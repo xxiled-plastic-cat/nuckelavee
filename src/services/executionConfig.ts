@@ -35,7 +35,7 @@ export function readExecutionConfig(): ExecutionConfig {
     minDwellSeconds: getEnvNumber("MIN_DWELL_SECONDS", 180),
     maxMovesPerHour: getEnvNumber("MAX_MOVES_PER_HOUR", 8),
     haltBlockMinutes: getEnvNumber("HALT_BLOCK_MINUTES", 6),
-    statePath: resolve(process.env.BOT_STATE_PATH ?? ".nuckelavee/state.json"),
+    statePath: resolve(process.env.BOT_STATE_PATH ?? "state/bot-state.json"),
   };
 }
 

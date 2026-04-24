@@ -36,6 +36,14 @@ The scan output now includes:
 
 `tick-exec` runs one target-selection/requote cycle. `watch-exec` runs the same cycle every `TICK_INTERVAL_MS` (default 60 seconds).
 
+State is persisted to a JSON file in the repo by default:
+
+```env
+BOT_STATE_PATH=state/bot-state.json
+```
+
+This keeps state tracked in the main project as requested. Runtime logs/temp files remain under `.nuckelavee/` and are ignored.
+
 Execution defaults to paper mode:
 
 ```env
@@ -52,3 +60,5 @@ PAYER_MNEMONIC="word1 word2 ... word25"
 ```
 
 Use a dedicated hot bot wallet only. The mnemonic is never logged; only the public address is derived for signing and matching own orders. The executor follows the official SDK example pattern: `algosdk.mnemonicToSecretKey`, `getNextOrderId`, `buildPlaceOrderTxns`, `buildCancelOrderTxn`, `sendRawTransaction`, and `waitForConfirmation`.
+
+For DigitalOcean worker deployment (non-serverless), run `npm run watch-exec` in a single worker process with the project directory writable so `state/bot-state.json` can be updated.

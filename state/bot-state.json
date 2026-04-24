@@ -1,0 +1,33 @@
+{
+  "activeTarget": {
+    "mode": "live",
+    "marketId": 185,
+    "strikeIndex": 4,
+    "strikeCents": 7800000,
+    "underlying": "BTC",
+    "timeframe": "daily",
+    "yesBuyPriceCents": 47,
+    "noBuyPriceCents": 47,
+    "targetScore": 0.7937234810460854,
+    "orderIds": [
+      "945",
+      "946"
+    ],
+    "placedAt": "2026-04-24T21:37:26.009Z",
+    "lastSeenAt": "2026-04-24T21:37:49.825Z"
+  },
+  "moveHistory": [
+    {
+      "mode": "paper",
+      "movedAt": "2026-04-24T21:30:38.249Z",
+      "to": "validation:0",
+      "reason": "state-path-validation"
+    },
+    {
+      "mode": "live",
+      "movedAt": "2026-04-24T21:37:26.011Z",
+      "to": "185:4",
+      "reason": "no active target; open initial quotes"
+    }
+  ]
+}

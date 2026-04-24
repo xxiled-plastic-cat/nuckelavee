@@ -3,6 +3,8 @@ import { dirname } from "node:path";
 
 import type { BotState } from "../types/execution.js";
 
+const MAX_MOVE_HISTORY_ENTRIES = 200;
+
 export function emptyBotState(): BotState {
   return { moveHistory: [] };
 }
@@ -24,6 +26,10 @@ export async function loadBotState(path: string): Promise<BotState> {
 }
 
 export async function saveBotState(path: string, state: BotState): Promise<void> {
+  const boundedState: BotState = {
+    ...state,
+    moveHistory: state.moveHistory.slice(-MAX_MOVE_HISTORY_ENTRIES),
+  };
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(path, `${JSON.stringify(boundedState, null, 2)}\n`, "utf8");
 }
