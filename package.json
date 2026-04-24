@@ -1,0 +1,27 @@
+{
+  "name": "nuckelavee",
+  "version": "1.0.0",
+  "description": "Nuckelavee v1 read-only Div3rsaFi scanner",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "scan": "tsx src/index.ts scan",
+    "watch": "tsx src/index.ts watch",
+    "tick-exec": "tsx src/index.ts tick-exec",
+    "watch-exec": "tsx src/index.ts watch-exec",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@div3rsafi/sdk": "^0.1.0-iGA.2",
+    "algosdk": "^3.5.2",
+    "dotenv": "^17.4.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0"
+  }
+}
