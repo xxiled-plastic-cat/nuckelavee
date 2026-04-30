@@ -1,20 +1,20 @@
 {
   "activeTarget": {
     "mode": "live",
-    "marketId": 185,
+    "marketId": 233,
     "strikeIndex": 4,
     "strikeCents": 7800000,
     "underlying": "BTC",
     "timeframe": "daily",
     "yesBuyPriceCents": 47,
     "noBuyPriceCents": 47,
-    "targetScore": 0.7937234810460854,
+    "targetScore": 0.8907846118168465,
     "orderIds": [
-      "945",
-      "946"
+      "981",
+      "982"
     ],
-    "placedAt": "2026-04-24T21:37:26.009Z",
-    "lastSeenAt": "2026-04-24T21:37:49.825Z"
+    "placedAt": "2026-04-25T09:34:52.169Z",
+    "lastSeenAt": "2026-04-25T16:46:21.082Z"
   },
   "moveHistory": [
     {
@@ -28,6 +28,13 @@
       "movedAt": "2026-04-24T21:37:26.011Z",
       "to": "185:4",
       "reason": "no active target; open initial quotes"
+    },
+    {
+      "mode": "live",
+      "movedAt": "2026-04-25T09:34:52.171Z",
+      "from": "185:4",
+      "to": "233:4",
+      "reason": "new target beats active by 12.2%"
     }
   ]
 }
