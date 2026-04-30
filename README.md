@@ -19,6 +19,34 @@ npm run watch-exec
 npm run typecheck
 ```
 
+Alpha module:
+
+```bash
+npm run alpha:scan
+npm run alpha:rewards
+npm run alpha:paper
+npm run alpha:paper-report
+npm run alpha:live-dry-run
+npm run alpha:live
+```
+
+Cron runner:
+
+```bash
+# Uses ALPHA_CRON_SCHEDULE and ALPHA_CRON_COMMAND from env.
+# Defaults to live trading.
+npm run alpha:cron
+
+# Common presets
+npm run alpha:cron:paper
+npm run alpha:cron:live-dry-run
+npm run alpha:cron:live
+npm run alpha:cron:live:once
+
+# One-shot execution for smoke tests
+npm run alpha:cron -- --once
+```
+
 Optional filter:
 
 ```bash
@@ -61,4 +89,24 @@ PAYER_MNEMONIC="word1 word2 ... word25"
 
 Use a dedicated hot bot wallet only. The mnemonic is never logged; only the public address is derived for signing and matching own orders. The executor follows the official SDK example pattern: `algosdk.mnemonicToSecretKey`, `getNextOrderId`, `buildPlaceOrderTxns`, `buildCancelOrderTxn`, `sendRawTransaction`, and `waitForConfirmation`.
 
-For DigitalOcean worker deployment (non-serverless), run `npm run watch-exec` in a single worker process with the project directory writable so `state/bot-state.json` can be updated.
+For DigitalOcean App Platform worker deployment, configure the worker command in the dashboard as:
+
+```bash
+npm run alpha:cron:live
+```
+
+Set these runtime env vars in App Platform:
+
+```env
+DATABASE_URL=
+ALPHA_API_KEY=
+PAYER_MNEMONIC=
+ALPHA_ENABLE_LIVE_TRADING=true
+ALPHA_CONFIRM_RISK=true
+ALPHA_CRON_SCHEDULE=*/2 * * * *
+ALPHA_CRON_COMMAND=npm run alpha:live
+ALPHA_MAX_ORDER_SIZE_USD=1
+ALPHA_MAX_MARKET_EXPOSURE_USD=3
+ALPHA_MAX_TOTAL_EXPOSURE_USD=10
+ALPHA_MAX_LIVE_OPEN_ORDERS=4
+```

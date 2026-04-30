@@ -9,19 +9,43 @@
     "watch": "tsx src/index.ts watch",
     "tick-exec": "tsx src/index.ts tick-exec",
     "watch-exec": "tsx src/index.ts watch-exec",
+    "alpha:scan": "tsx src/alpha/alphaCommands.ts scan",
+    "alpha:rewards": "tsx src/alpha/alphaCommands.ts rewards",
+    "alpha:watch": "tsx src/alpha/alphaCommands.ts watch",
+    "alpha:market": "tsx src/alpha/alphaCommands.ts market",
+    "alpha:paper": "tsx src/alpha/alphaCommands.ts paper",
+    "alpha:paper-watch": "tsx src/alpha/alphaCommands.ts paper-watch",
+    "alpha:paper-report": "tsx src/alpha/alphaCommands.ts paper-report",
+    "alpha:live-dry-run": "tsx src/alpha/alphaCommands.ts live-dry-run",
+    "alpha:live": "tsx src/alpha/alphaCommands.ts live",
+    "alpha:cron": "tsx src/alpha/alphaCron.ts",
+    "alpha:cron:paper": "ALPHA_CRON_COMMAND=\"npm run alpha:paper\" tsx src/alpha/alphaCron.ts",
+    "alpha:cron:live-dry-run": "ALPHA_CRON_COMMAND=\"npm run alpha:live-dry-run\" tsx src/alpha/alphaCron.ts",
+    "alpha:cron:live": "ALPHA_CRON_COMMAND=\"npm run alpha:live\" tsx src/alpha/alphaCron.ts",
+    "alpha:cron:live:once": "ALPHA_CRON_COMMAND=\"npm run alpha:live\" tsx src/alpha/alphaCron.ts --once",
+    "alpha:typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@algorandfoundation/algokit-utils": "^9.2.0",
+    "@alpha-arcade/sdk": "^0.3.7",
     "@div3rsafi/sdk": "^0.1.0-iGA.2",
     "algosdk": "^3.5.2",
     "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "node-cron": "^4.2.1",
+    "postgres": "^3.4.9",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0"
+    "@types/node": "^25.6.0",
+    "drizzle-kit": "^0.31.10"
   }
 }
