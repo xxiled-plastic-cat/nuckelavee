@@ -467,6 +467,20 @@ async function loadWalletOpenOrders(
   }
 }
 
+async function finalLiveTickResult(
+  liveClient: AlphaSdkClient,
+  config: AlphaConfig,
+  actions: LiveAction[],
+  state: AlphaBotState,
+): Promise<LiveTickResult> {
+  const [walletUsdcBalanceUsd, walletAlgoBalance] = await Promise.all([
+    config.walletAddress ? liveClient.getUsdcBalance(config.walletAddress) : Promise.resolve(undefined),
+    config.walletAddress ? liveClient.getAlgoBalance(config.walletAddress) : Promise.resolve(undefined),
+  ]);
+  actions.push({ kind: "skip", message: "Refreshed wallet USDC/ALGO balances for live summary" });
+  return { actions, state, walletUsdcBalanceUsd, walletAlgoBalance };
+}
+
 function rankDiversifiedQuotes(quotes: AlphaQuote[], state: AlphaBotState, config: AlphaConfig): AlphaQuote[] {
   const openByMarket = new Map<number, number>();
   const openOutcomesByMarket = new Map<number, Set<AlphaQuote["outcome"]>>();
@@ -706,7 +720,7 @@ export async function runLiveTick(
       )} below safety floor ${config.minAlgoBalance.toFixed(2)}`,
     });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return { actions, state, walletUsdcBalanceUsd, walletAlgoBalance };
+    return finalLiveTickResult(liveClient, config, actions, state);
   }
 
   const openLiveOrders = state.openOrders.filter((order) => order.runMode === "live" && order.status === "open" && order.liveEscrowAppId !== undefined);
@@ -726,7 +740,7 @@ export async function runLiveTick(
   if (slots === 0) {
     actions.push({ kind: "skip", message: "No live order slots available under ALGO MBR-aware cap" });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return { actions, state, walletUsdcBalanceUsd, walletAlgoBalance };
+    return finalLiveTickResult(liveClient, config, actions, state);
   }
 
   const rankedQuotes = rankDiversifiedQuotes(quotes, state, config);
@@ -803,5 +817,5 @@ export async function runLiveTick(
   }
   state.strategyStats.lastRunMode = mode;
   if (mode === "live") await saveAlphaState(config.stateKey, state);
-  return { actions, state, walletUsdcBalanceUsd, walletAlgoBalance };
+  return finalLiveTickResult(liveClient, config, actions, state);
 }

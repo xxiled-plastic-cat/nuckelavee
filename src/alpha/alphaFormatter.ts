@@ -222,19 +222,23 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
   const rewardEligible = open.filter((order) => order.rewardEligible).length;
   const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
   console.log("");
-  console.log(
-    `[${new Date().toISOString().slice(11, 19)}] liveSummary walletUsdc=${fmtUsd(
-      walletUsdcBalanceUsd,
-    )} walletAlgo=${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)} openOrders=${open.length} rewardEligible=${rewardEligible} exposure=${fmtUsd(
-      exposure,
-    )} realisedPnl=${fmtUsd(state.realisedPnl)} unrealisedPnl=${fmtUsd(state.unrealisedPnl)} tradingPnl=${fmtUsd(
-      state.totalPnl,
-    )} spreadPnl=${fmtUsd(state.strategyStats.spreadRealisedPnl)} spreadFills=${state.strategyStats.spreadEntryFills}/${
-      state.strategyStats.spreadExitFills
-    } parityPnl=${fmtUsd(state.strategyStats.parityGrossPnl)} parityTrades=${state.strategyStats.parityTradesExecuted} parityFailed=${
-      state.strategyStats.parityFailedLegs
-    } estRewards=${fmtUsd(state.estimatedRewardsUsd)} livePlaced=${state.strategyStats.liveOrdersPlaced} liveCancelled=${state.strategyStats.liveOrdersCancelled}`,
-  );
+  console.log(`[${new Date().toISOString().slice(11, 19)}] liveSummary`);
+  console.log(`  walletUsdc: ${fmtUsd(walletUsdcBalanceUsd)}`);
+  console.log(`  walletAlgo: ${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`);
+  console.log(`  openOrders: ${open.length}`);
+  console.log(`  rewardEligible: ${rewardEligible}`);
+  console.log(`  exposure: ${fmtUsd(exposure)}`);
+  console.log(`  realisedPnl: ${fmtUsd(state.realisedPnl)}`);
+  console.log(`  unrealisedPnl: ${fmtUsd(state.unrealisedPnl)}`);
+  console.log(`  tradingPnl: ${fmtUsd(state.totalPnl)}`);
+  console.log(`  spreadPnl: ${fmtUsd(state.strategyStats.spreadRealisedPnl)}`);
+  console.log(`  spreadFills: ${state.strategyStats.spreadEntryFills}/${state.strategyStats.spreadExitFills}`);
+  console.log(`  parityPnl: ${fmtUsd(state.strategyStats.parityGrossPnl)}`);
+  console.log(`  parityTrades: ${state.strategyStats.parityTradesExecuted}`);
+  console.log(`  parityFailed: ${state.strategyStats.parityFailedLegs}`);
+  console.log(`  estRewards: ${fmtUsd(state.estimatedRewardsUsd)}`);
+  console.log(`  livePlaced: ${state.strategyStats.liveOrdersPlaced}`);
+  console.log(`  liveCancelled: ${state.strategyStats.liveOrdersCancelled}`);
 }
 
 export function printPaperReport(state: AlphaBotState): void {
