@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 
 import cron from "node-cron";
 import dotenv from "dotenv";
+import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
 
 dotenv.config();
 
@@ -10,6 +11,7 @@ const schedule = process.env.ALPHA_CRON_SCHEDULE || "*/2 * * * *";
 const command = process.env.ALPHA_CRON_COMMAND || "npm run alpha:live";
 const once = process.argv.includes("--once");
 const healthPort = Number.parseInt(process.env.PORT || process.env.ALPHA_HEALTH_PORT || "", 10);
+const skipNoticeThrottleMinutes = readSkipNoticeThrottleMinutes();
 let running = false;
 let lastTickStartedAt: string | undefined;
 let lastTickEndedAt: string | undefined;
@@ -67,19 +69,32 @@ async function main(): Promise<void> {
   console.log(`NUCKELAVEE ALPHA CRON`);
   console.log(`Schedule: ${schedule}`);
   console.log(`Command: ${command}`);
+  await notifyTelegram(`Nuckelavee alpha cron started\nschedule=${schedule}\ncommand=${command}`);
   startHealthServer();
   cron.schedule(schedule, async () => {
     if (running) {
-      console.log(`[${new Date().toISOString()}] previous tick still running; skipping this schedule`);
+      const skippedAt = new Date().toISOString();
+      console.log(`[${skippedAt}] previous tick still running; skipping this schedule`);
+      await notifyTelegramThrottled(
+        "alpha-cron-overlap-skip",
+        `Nuckelavee cron overlap skip\nat=${skippedAt}\nprevious_tick_started_at=${lastTickStartedAt ?? "unknown"}`,
+        { throttleMinutes: skipNoticeThrottleMinutes },
+      );
       return;
     }
     running = true;
     lastTickStartedAt = new Date().toISOString();
     console.log(`[${lastTickStartedAt}] cron tick start`);
+    await notifyTelegram(`Nuckelavee cron tick start\nat=${lastTickStartedAt}`);
     const exitCode = await runTick();
     lastTickEndedAt = new Date().toISOString();
     lastTickExitCode = exitCode;
     console.log(`[${lastTickEndedAt}] cron tick end exit_code=${exitCode}`);
+    await notifyTelegram(
+      exitCode === 0
+        ? `Nuckelavee cron tick end\nat=${lastTickEndedAt}\nexit_code=${exitCode}`
+        : `ALERT: Nuckelavee cron tick failed\nat=${lastTickEndedAt}\nexit_code=${exitCode}`,
+    );
     running = false;
   });
 }

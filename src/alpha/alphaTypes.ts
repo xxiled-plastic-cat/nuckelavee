@@ -182,6 +182,9 @@ export type AlphaBotState = {
     lastParityTradeAt?: string;
     lastRunMode?: string;
   };
+  notificationState?: {
+    lastDailySummaryDate?: string;
+  };
   lastUpdated: string;
 };
 

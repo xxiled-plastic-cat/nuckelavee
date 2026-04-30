@@ -5,9 +5,13 @@ import { AlphaSdkClient } from "./alphaClient.js";
 import { loadAlphaScan } from "./alphaMarketScanner.js";
 import { rankRewardCandidates } from "./alphaRewardScanner.js";
 import { scanParity } from "./alphaParityScanner.js";
+import { saveAlphaState } from "./alphaStateStore.js";
 import { printLiveSummary, printMarketDetail, printPaperReport, printPaperWatch, printRewards, printScan } from "./alphaFormatter.js";
+import type { AlphaBotState } from "./alphaTypes.js";
 import { runPaperTick, loadPaperReport } from "./paperTrader.js";
+import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
+import { notifyTelegram } from "./telegramNotifier.js";
 import { closeDatabase } from "../db.js";
 
 dotenv.config();
@@ -70,9 +74,105 @@ async function runPaperReportCommand(): Promise<void> {
   printPaperReport(state);
 }
 
+function isLowBalanceWarning(message: string): boolean {
+  return (
+    message.includes("below safety floor") ||
+    message.includes("below parity cost") ||
+    message.includes("below split amount") ||
+    message.includes("No live placements; wallet ALGO")
+  );
+}
+
+function buildLiveActionNotifications(actions: LiveAction[], mode: "live-dry-run" | "live"): string[] {
+  if (mode !== "live") return [];
+  const messages: string[] = [];
+  for (const action of actions) {
+    if (action.kind === "place") {
+      messages.push(`Live order placed\n${action.message}`);
+      continue;
+    }
+    if (action.kind === "cancel") {
+      messages.push(`Live order cancelled\n${action.message}`);
+      continue;
+    }
+    if (action.message.startsWith("Inferred live entry fill") || action.message.startsWith("Inferred live exit fill")) {
+      messages.push(`Inferred fill\n${action.message}`);
+      continue;
+    }
+    if (action.kind === "parity" && action.message.startsWith("Executed")) {
+      messages.push(`Parity trade executed\n${action.message}`);
+      continue;
+    }
+    if (action.message.startsWith("Parity failed")) {
+      messages.push(`ALERT: parity trade failed\n${action.message}`);
+      continue;
+    }
+    if (isLowBalanceWarning(action.message)) {
+      messages.push(`ALERT: low wallet balance\n${action.message}`);
+    }
+  }
+  return messages;
+}
+
+function readDailySummaryHourUtc(): number | undefined {
+  const raw = process.env.ALPHA_TELEGRAM_DAILY_SUMMARY_HOUR?.trim();
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 23) return undefined;
+  return parsed;
+}
+
+function formatUsd(value: number | undefined): string {
+  if (value === undefined) return "unknown";
+  return `$${value.toFixed(2)}`;
+}
+
+function shouldSendDailySummary(state: AlphaBotState): boolean {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  if (state.notificationState?.lastDailySummaryDate === today) return false;
+  const targetHour = readDailySummaryHourUtc();
+  if (targetHour === undefined) return true;
+  return now.getUTCHours() === targetHour;
+}
+
+function buildDailySummaryMessage(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number): string {
+  const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
+  const rewardEligible = open.filter((order) => order.rewardEligible).length;
+  const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
+  const date = new Date().toISOString().slice(0, 10);
+  return [
+    `Daily summary ${date}`,
+    `wallet_usdc=${formatUsd(walletUsdcBalanceUsd)}`,
+    `wallet_algo=${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`,
+    `open_orders=${open.length}`,
+    `reward_eligible=${rewardEligible}`,
+    `exposure=${formatUsd(exposure)}`,
+    `trading_pnl=${formatUsd(state.totalPnl)}`,
+    `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)}`,
+    `parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
+    `est_rewards=${formatUsd(state.estimatedRewardsUsd)}`,
+    `live_placed=${state.strategyStats.liveOrdersPlaced}`,
+    `live_cancelled=${state.strategyStats.liveOrdersCancelled}`,
+  ].join("\n");
+}
+
 async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
   const { config, scan } = await buildScan(mode === "live");
   const result = await runLiveTick(scan, config, mode);
+  const notifications = buildLiveActionNotifications(result.actions, mode);
+  for (const message of notifications) {
+    await notifyTelegram(message);
+  }
+  if (mode === "live" && shouldSendDailySummary(result.state)) {
+    const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance);
+    const sent = await notifyTelegram(dailySummary);
+    if (sent) {
+      result.state.notificationState ??= {};
+      result.state.notificationState.lastDailySummaryDate = new Date().toISOString().slice(0, 10);
+      await saveAlphaState(config.stateKey, result.state);
+    }
+  }
   console.log(mode === "live" ? "NUCKELAVEE ALPHA LIVE" : "NUCKELAVEE ALPHA LIVE DRY RUN");
   console.log("");
   for (const action of result.actions) {

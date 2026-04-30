@@ -38,6 +38,7 @@ export function emptyAlphaState(startingBalance: number): AlphaBotState {
       parityNetPnlEstimate: 0,
       parityFailedLegs: 0,
     },
+    notificationState: {},
     lastUpdated: now,
   };
 }
@@ -57,6 +58,7 @@ function normalizeAlphaState(parsed: AlphaBotState, startingBalance: number): Al
       ...emptyAlphaState(startingBalance).strategyStats,
       ...parsed.strategyStats,
     },
+    notificationState: parsed.notificationState ?? {},
   };
 }
 
