@@ -10,7 +10,7 @@ export type AlphaScanResult = {
 };
 
 export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig): Promise<AlphaScanResult> {
-  const markets = (await client.getLiveMarkets()).slice(0, config.maxMarketsPerScan);
+  const markets = await client.getLiveMarkets();
   let rewardMarkets: AlphaMarket[] = [];
   let rewardError: string | undefined;
   try {
@@ -25,10 +25,10 @@ export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig)
     if (!rewardByAppId.has(market.marketAppId)) spreadByAppId.set(market.marketAppId, market);
   }
   const marketsToScanByAppId = new Map<number, AlphaMarket>();
-  for (const market of [...rewardByAppId.values()].slice(0, config.scanOrderbookLimit)) {
+  for (const market of rewardByAppId.values()) {
     marketsToScanByAppId.set(market.marketAppId, market);
   }
-  for (const market of [...spreadByAppId.values()].slice(0, config.spreadScanOrderbookLimit)) {
+  for (const market of spreadByAppId.values()) {
     marketsToScanByAppId.set(market.marketAppId, market);
   }
   const marketsToScan = [...marketsToScanByAppId.values()];
