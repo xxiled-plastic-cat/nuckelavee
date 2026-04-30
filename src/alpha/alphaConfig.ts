@@ -20,14 +20,26 @@ export type AlphaConfig = {
   maxRewardCompetition: "low" | "medium" | "high";
   minEdgeBps: number;
   parityBufferBps: number;
+  enableParityArb: boolean;
+  parityMinEdgeBps: number;
+  parityMaxTradeUsd: number;
+  parityMaxDailyUsd: number;
+  paritySlippageCents: number;
+  parityMinDepthUsd: number;
+  parityRequireImmediateMerge: boolean;
   minMakerSpreadCents: number;
   enableSpreadCapture: boolean;
   spreadOrderSizeUsd: number;
   minSpreadCaptureCents: number;
+  minSpreadVolumeUsd: number;
+  minSpreadDepthUsd: number;
+  spreadPersistenceScans: number;
+  spreadExitSlotReserve: number;
+  minSpreadEntryMidpoint: number;
+  minSpreadExitMidpoint: number;
   spreadEntryMinDwellSeconds: number;
   spreadExitEdgeCents: number;
   spreadExitMinDwellSeconds: number;
-  minSpreadMidpoint: number;
   maxSpreadMidpoint: number;
   maxSpreadMarketExposureUsd: number;
   minTimeToCloseMinutes: number;
@@ -102,14 +114,26 @@ export function readAlphaConfig(): AlphaConfig {
     maxRewardCompetition: readCompetition("ALPHA_MAX_REWARD_COMPETITION", "medium"),
     minEdgeBps: readNumber("ALPHA_MIN_EDGE_BPS", 75),
     parityBufferBps: readNumber("ALPHA_PARITY_BUFFER_BPS", 75),
+    enableParityArb: readBool("ALPHA_ENABLE_PARITY_ARB", false),
+    parityMinEdgeBps: readNumber("ALPHA_PARITY_MIN_EDGE_BPS", 150),
+    parityMaxTradeUsd: readNumber("ALPHA_PARITY_MAX_TRADE_USD", 1),
+    parityMaxDailyUsd: readNumber("ALPHA_PARITY_MAX_DAILY_USD", 3),
+    paritySlippageCents: readNumber("ALPHA_PARITY_SLIPPAGE_CENTS", 0.25),
+    parityMinDepthUsd: readNumber("ALPHA_PARITY_MIN_DEPTH_USD", 1),
+    parityRequireImmediateMerge: readBool("ALPHA_PARITY_REQUIRE_IMMEDIATE_MERGE", true),
     minMakerSpreadCents: readNumber("ALPHA_MIN_MAKER_SPREAD_CENTS", 4),
     enableSpreadCapture: readBool("ALPHA_ENABLE_SPREAD_CAPTURE", true),
     spreadOrderSizeUsd: readNumber("ALPHA_SPREAD_ORDER_SIZE_USD", 1),
-    minSpreadCaptureCents: readNumber("ALPHA_MIN_SPREAD_CAPTURE_CENTS", 0.5),
+    minSpreadCaptureCents: readNumber("ALPHA_MIN_SPREAD_CAPTURE_CENTS", 1),
+    minSpreadVolumeUsd: readNumber("ALPHA_MIN_SPREAD_VOLUME_USD", 1),
+    minSpreadDepthUsd: readNumber("ALPHA_MIN_SPREAD_DEPTH_USD", 0.25),
+    spreadPersistenceScans: readInt("ALPHA_SPREAD_PERSISTENCE_SCANS", 2),
+    spreadExitSlotReserve: readInt("ALPHA_SPREAD_EXIT_SLOT_RESERVE", 2),
+    minSpreadEntryMidpoint: readNumber("ALPHA_MIN_SPREAD_ENTRY_MIDPOINT", 0.05),
+    minSpreadExitMidpoint: readNumber("ALPHA_MIN_SPREAD_EXIT_MIDPOINT", 0.01),
     spreadEntryMinDwellSeconds: readInt("ALPHA_SPREAD_ENTRY_MIN_DWELL_SECONDS", 600),
     spreadExitEdgeCents: readNumber("ALPHA_SPREAD_EXIT_EDGE_CENTS", 1),
     spreadExitMinDwellSeconds: readInt("ALPHA_SPREAD_EXIT_MIN_DWELL_SECONDS", 1_800),
-    minSpreadMidpoint: readNumber("ALPHA_MIN_SPREAD_MIDPOINT", 0.01),
     maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),
     maxSpreadMarketExposureUsd: readNumber("ALPHA_MAX_SPREAD_MARKET_EXPOSURE_USD", 2),
     minTimeToCloseMinutes: readNumber("ALPHA_MIN_TIME_TO_CLOSE_MINUTES", 60),

@@ -24,8 +24,8 @@ async function buildScan(liveSigner = false) {
 }
 
 async function runScanCommand(): Promise<void> {
-  const { scan, rewardCandidates, parity } = await buildScan(false);
-  printScan(scan, rewardCandidates, parity);
+  const { config, scan, rewardCandidates, parity } = await buildScan(false);
+  printScan(scan, rewardCandidates, parity, config);
 }
 
 async function runRewardsCommand(): Promise<void> {

@@ -111,6 +111,45 @@ export type AlphaPaperPosition = {
   lastMark?: number;
 };
 
+export type AlphaSpreadMarketStats = {
+  marketId: string;
+  marketAppId: number;
+  title: string;
+  volume?: number;
+  observedScans: number;
+  consecutiveTwoSidedScans: number;
+  bestDepthUsd?: number;
+  bestSpreadCents?: number;
+  lastTwoSidedAt?: string;
+  lastSeenAt: string;
+};
+
+export type AlphaParityPlan = {
+  type: "PARITY" | "SPLIT_MERGE";
+  marketId: string;
+  marketAppId: number;
+  slug?: string;
+  title: string;
+  sizeShares: number;
+  notionalUsd: number;
+  yesPrice: number;
+  noPrice: number;
+  grossEdgeBps: number;
+  estimatedNetEdgeBps: number;
+  expectedGrossPnlUsd: number;
+  requiredAction: string;
+  warnings: string[];
+};
+
+export type AlphaParityAttempt = AlphaParityPlan & {
+  id: string;
+  mode: "live-dry-run" | "live" | "paper";
+  status: "planned" | "executed" | "failed" | "skipped";
+  reason?: string;
+  txIds?: string[];
+  createdAt: string;
+};
+
 export type AlphaBotState = {
   startingBalance: number;
   cash: number;
@@ -120,6 +159,8 @@ export type AlphaBotState = {
   unrealisedPnl: number;
   estimatedRewardsUsd: number;
   estimatedRewardsByMarket: Record<string, number>;
+  spreadStatsByMarket: Record<string, AlphaSpreadMarketStats>;
+  parityAttempts: AlphaParityAttempt[];
   rewardEligibleSeconds: number;
   totalPnl: number;
   fills: AlphaPaperOrder[];
@@ -131,6 +172,14 @@ export type AlphaBotState = {
     quotesPlaced: number;
     liveOrdersPlaced: number;
     liveOrdersCancelled: number;
+    spreadEntryFills: number;
+    spreadExitFills: number;
+    spreadRealisedPnl: number;
+    parityTradesExecuted: number;
+    parityGrossPnl: number;
+    parityNetPnlEstimate: number;
+    parityFailedLegs: number;
+    lastParityTradeAt?: string;
     lastRunMode?: string;
   };
   lastUpdated: string;

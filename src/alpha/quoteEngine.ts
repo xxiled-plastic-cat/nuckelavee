@@ -58,7 +58,8 @@ export function generateQuotes(
     const rewardBuffer = config.rewardZoneBufferCents / 100;
     const spread = outcomeBook.spread;
     const rewardMidpointAllowed = midpoint >= config.minMidpoint && midpoint <= config.maxMidpoint;
-    const spreadMidpointAllowed = midpoint >= config.minSpreadMidpoint && midpoint <= config.maxSpreadMidpoint;
+    const spreadEntryMidpointAllowed = midpoint >= config.minSpreadEntryMidpoint && midpoint <= config.maxSpreadMidpoint;
+    const spreadExitMidpointAllowed = midpoint >= config.minSpreadExitMidpoint && midpoint <= config.maxSpreadMidpoint;
     let bid = market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed ? midpoint - rewardBuffer : undefined;
     if (bid !== undefined && outcomeBook.ask !== undefined && bid >= outcomeBook.ask) {
       bid = outcomeBook.ask - 0.01;
@@ -95,7 +96,7 @@ export function generateQuotes(
       }
     }
 
-    const spreadBid = spreadMidpointAllowed ? insideSpreadBid(outcomeBook, config) : undefined;
+    const spreadBid = spreadEntryMidpointAllowed ? insideSpreadBid(outcomeBook, config) : undefined;
     if (spreadBid !== undefined) {
       const sized = quoteSize(spreadBid, Math.min(config.spreadOrderSizeUsd, config.maxOrderSizeUsd));
       if (sized) {
@@ -124,7 +125,7 @@ export function generateQuotes(
     let ask =
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
-        : spreadMidpointAllowed
+        : spreadExitMidpointAllowed
           ? insideSpreadAsk(outcomeBook, config)
           : undefined;
     if (ask !== undefined && outcomeBook.bid !== undefined && ask <= outcomeBook.bid) {

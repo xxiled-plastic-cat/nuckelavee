@@ -6,6 +6,19 @@ import type { AlphaBookLevel, AlphaMarket, AlphaOrderbook, AlphaRewardInfo } fro
 
 const MICRO = 1_000_000;
 
+type AlphaRuntimeClient = AlphaClient & {
+  createMarketOrder?: (input: {
+    marketAppId: number;
+    position: 0 | 1;
+    price: number;
+    quantity: number;
+    isBuying: boolean;
+    slippage: number;
+  }) => Promise<{ escrowAppId?: number; txIds?: string[]; confirmedRound?: number; matchedQuantity?: number; actualFillPrice?: number }>;
+  mergeShares?: (input: { marketAppId: number; amount: number }) => Promise<{ txIds?: string[]; confirmedRound?: number }>;
+  splitShares?: (input: { marketAppId: number; amount: number }) => Promise<{ txIds?: string[]; confirmedRound?: number }>;
+};
+
 export function fromMicroUnits(value: number | null | undefined): number | undefined {
   if (value === null || value === undefined || !Number.isFinite(value)) return undefined;
   return value / MICRO;
@@ -268,6 +281,53 @@ export class AlphaSdkClient {
       quantity: toMicroUnits(input.sizeShares),
       isBuying: input.isBuying,
     });
+  }
+
+  async createMarketOrder(input: {
+    marketAppId: number;
+    outcome: "YES" | "NO";
+    price: number;
+    sizeShares: number;
+    isBuying: boolean;
+    slippage: number;
+  }): Promise<{ escrowAppId?: number; txIds: string[]; confirmedRound?: number; matchedQuantity?: number; actualFillPrice?: number }> {
+    const runtimeClient = this.client as AlphaRuntimeClient;
+    if (!runtimeClient.createMarketOrder) throw new Error("Alpha SDK does not expose createMarketOrder");
+    const result = await runtimeClient.createMarketOrder({
+      marketAppId: input.marketAppId,
+      position: input.outcome === "YES" ? 1 : 0,
+      price: toMicroUnits(input.price),
+      quantity: toMicroUnits(input.sizeShares),
+      isBuying: input.isBuying,
+      slippage: toMicroUnits(input.slippage),
+    });
+    const looseResult = result as typeof result & { matchedQuantity?: number; actualFillPrice?: number };
+    return {
+      ...looseResult,
+      txIds: looseResult.txIds ?? [],
+      matchedQuantity: fromMicroUnits(looseResult.matchedQuantity),
+      actualFillPrice: fromMicroUnits(looseResult.actualFillPrice),
+    };
+  }
+
+  async mergeShares(input: { marketAppId: number; amountShares: number }): Promise<{ txIds: string[]; confirmedRound?: number }> {
+    const runtimeClient = this.client as AlphaRuntimeClient;
+    if (!runtimeClient.mergeShares) throw new Error("Alpha SDK does not expose mergeShares");
+    const result = await runtimeClient.mergeShares({
+      marketAppId: input.marketAppId,
+      amount: toMicroUnits(input.amountShares),
+    });
+    return { ...result, txIds: result.txIds ?? [] };
+  }
+
+  async splitShares(input: { marketAppId: number; amountUsd: number }): Promise<{ txIds: string[]; confirmedRound?: number }> {
+    const runtimeClient = this.client as AlphaRuntimeClient;
+    if (!runtimeClient.splitShares) throw new Error("Alpha SDK does not expose splitShares");
+    const result = await runtimeClient.splitShares({
+      marketAppId: input.marketAppId,
+      amount: toMicroUnits(input.amountUsd),
+    });
+    return { ...result, txIds: result.txIds ?? [] };
   }
 
   async cancelOrder(input: { marketAppId: number; escrowAppId: number; orderOwner: string }): Promise<{ success: boolean }> {

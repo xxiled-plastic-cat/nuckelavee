@@ -14,6 +14,7 @@ function crossed(order: AlphaPaperOrder, price: number): boolean {
 function ensurePosition(state: AlphaBotState, order: AlphaPaperOrder) {
   state.positionsByMarket[order.marketId] ??= {
     marketId: order.marketId,
+    marketAppId: order.marketAppId,
     slug: order.slug,
     title: order.title,
     yesShares: 0,

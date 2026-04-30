@@ -6,10 +6,11 @@ import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaQuote } from "./alphaTypes.js";
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
 import { generateQuotes } from "./quoteEngine.js";
+import { runParityLane } from "./parityTrader.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 
 export type LiveAction = {
-  kind: "place" | "cancel" | "skip";
+  kind: "place" | "cancel" | "skip" | "parity";
   message: string;
 };
 
@@ -88,7 +89,11 @@ function orderAgeSeconds(order: Pick<AlphaPaperOrder, "createdAt">): number {
   return Number.isFinite(created) ? Math.max(0, (Date.now() - created) / 1000) : 0;
 }
 
-function mergeLiveOrdersFromWallet(state: AlphaBotState, orders: OpenOrder[], marketByAppId: Map<number, AlphaMarket>): number {
+function mergeLiveOrdersFromWallet(
+  state: AlphaBotState,
+  orders: OpenOrder[],
+  marketByAppId: Map<number, AlphaMarket>,
+): { synced: number; closedOrders: AlphaPaperOrder[] } {
   const previousLiveByEscrow = new Map(
     state.openOrders
       .filter((order) => order.runMode === "live" && order.liveEscrowAppId !== undefined)
@@ -115,13 +120,14 @@ function mergeLiveOrdersFromWallet(state: AlphaBotState, orders: OpenOrder[], ma
     });
 
   const liveEscrows = new Set(openLive.map((order) => order.liveEscrowAppId));
+  const closedOrders: AlphaPaperOrder[] = [];
   for (const previous of previousLiveByEscrow.values()) {
     if (previous.liveEscrowAppId !== undefined && !liveEscrows.has(previous.liveEscrowAppId)) {
-      state.cancelledOrders.push({ ...previous, status: "cancelled", updatedAt: new Date().toISOString() });
+      closedOrders.push(previous);
     }
   }
   state.openOrders = [...state.openOrders.filter((order) => order.runMode !== "live"), ...openLive];
-  return openLive.length;
+  return { synced: openLive.length, closedOrders };
 }
 
 function mergeLivePositionsFromWallet(state: AlphaBotState, positions: WalletPosition[], marketByAppId: Map<number, AlphaMarket>): number {
@@ -155,10 +161,210 @@ function positionShareCount(position: { yesShares: number; noShares: number }, o
   return outcome === "YES" ? position.yesShares : position.noShares;
 }
 
+type PositionSnapshot = Record<string, { yesShares: number; noShares: number; avgYesCost: number; avgNoCost: number }>;
+
+function snapshotPositions(state: AlphaBotState): PositionSnapshot {
+  return Object.fromEntries(
+    Object.entries(state.positionsByMarket).map(([marketId, position]) => [
+      marketId,
+      {
+        yesShares: position.yesShares,
+        noShares: position.noShares,
+        avgYesCost: position.avgYesCost,
+        avgNoCost: position.avgNoCost,
+      },
+    ]),
+  );
+}
+
+function walletPositionSnapshot(positions: WalletPosition[], marketByAppId: Map<number, AlphaMarket>): PositionSnapshot {
+  const snapshot: PositionSnapshot = {};
+  for (const position of positions) {
+    const market = marketByAppId.get(position.marketAppId);
+    const marketId = market?.id ?? String(position.marketAppId);
+    snapshot[marketId] = {
+      yesShares: fromMicroUnits(position.yesBalance) ?? 0,
+      noShares: fromMicroUnits(position.noBalance) ?? 0,
+      avgYesCost: 0,
+      avgNoCost: 0,
+    };
+  }
+  return snapshot;
+}
+
+function ensureLivePosition(state: AlphaBotState, order: AlphaPaperOrder) {
+  state.positionsByMarket[order.marketId] ??= {
+    marketId: order.marketId,
+    marketAppId: order.marketAppId,
+    slug: order.slug,
+    title: order.title,
+    yesShares: 0,
+    noShares: 0,
+    avgYesCost: 0,
+    avgNoCost: 0,
+    realisedPnl: 0,
+    unrealisedPnl: 0,
+  };
+  return state.positionsByMarket[order.marketId];
+}
+
+function inferClosedLiveOrders(
+  state: AlphaBotState,
+  closedOrders: AlphaPaperOrder[],
+  beforePositions: PositionSnapshot,
+  walletPositions: PositionSnapshot,
+  actions: LiveAction[],
+): void {
+  const now = new Date().toISOString();
+  for (const order of closedOrders) {
+    const before = beforePositions[order.marketId] ?? { yesShares: 0, noShares: 0, avgYesCost: 0, avgNoCost: 0 };
+    const wallet = walletPositions[order.marketId] ?? { yesShares: 0, noShares: 0, avgYesCost: 0, avgNoCost: 0 };
+    const beforeShares = order.outcome === "YES" ? before.yesShares : before.noShares;
+    const walletShares = order.outcome === "YES" ? wallet.yesShares : wallet.noShares;
+    const fill = order.side === "bid" ? Math.min(order.remainingShares, Math.max(0, walletShares - beforeShares)) : Math.min(order.remainingShares, Math.max(0, beforeShares - walletShares));
+
+    if (fill <= 0.000001) {
+      state.cancelledOrders.push({ ...order, status: "cancelled", updatedAt: now });
+      continue;
+    }
+
+    const position = ensureLivePosition(state, order);
+    const filled = { ...order, status: "filled" as const, filledShares: order.filledShares + fill, remainingShares: Math.max(0, order.remainingShares - fill), updatedAt: now };
+    if (order.side === "bid") {
+      const avgCost = order.outcome === "YES" ? before.avgYesCost : before.avgNoCost;
+      const newShares = Math.max(beforeShares + fill, walletShares);
+      const newAvg = newShares > 0 ? (beforeShares * avgCost + fill * order.price) / newShares : 0;
+      if (order.outcome === "YES") {
+        position.yesShares = newShares;
+        position.avgYesCost = newAvg;
+      } else {
+        position.noShares = newShares;
+        position.avgNoCost = newAvg;
+      }
+      if (order.source === "spread") state.strategyStats.spreadEntryFills += 1;
+      actions.push({ kind: "skip", message: `Inferred live fill ${order.title} ${order.outcome} bid ${fill.toFixed(6)} share(s) at ${order.price.toFixed(3)}` });
+    } else {
+      const avgCost = order.outcome === "YES" ? before.avgYesCost : before.avgNoCost;
+      const pnl = (order.price - avgCost) * fill;
+      if (order.outcome === "YES") {
+        position.yesShares = walletShares;
+        if (walletShares <= 0) position.avgYesCost = 0;
+      } else {
+        position.noShares = walletShares;
+        if (walletShares <= 0) position.avgNoCost = 0;
+      }
+      position.realisedPnl += pnl;
+      state.realisedPnl += pnl;
+      if (order.source === "inventory_exit") {
+        state.strategyStats.spreadExitFills += 1;
+        state.strategyStats.spreadRealisedPnl += pnl;
+      }
+      actions.push({
+        kind: "skip",
+        message: `Inferred live exit fill ${order.title} ${order.outcome} ask ${fill.toFixed(6)} share(s) at ${order.price.toFixed(3)}; spreadPnl=${fmtSignedUsd(pnl)}`,
+      });
+    }
+    state.fills.push(filled);
+  }
+}
+
+function fmtSignedUsd(value: number): string {
+  return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(4)}`;
+}
+
 function getOutcomeBook(book: AlphaOrderbook, outcome: AlphaOutcome): { bid?: number; ask?: number; mid?: number; spread?: number } {
   return outcome === "YES"
     ? { bid: book.yesBid, ask: book.yesAsk, mid: book.yesMid, spread: book.yesSpread }
     : { bid: book.noBid, ask: book.noAsk, mid: book.noMid, spread: book.noSpread };
+}
+
+function bestExternalDepthUsd(levels: Array<{ price: number; quantityShares: number; owner?: string }>, walletAddress?: string): number {
+  const level = levels.find((candidate) => candidate.owner === undefined || candidate.owner !== walletAddress);
+  return level ? level.price * level.quantityShares : 0;
+}
+
+function outcomeDepthUsd(book: AlphaOrderbook, outcome: AlphaOutcome, walletAddress?: string): number {
+  const orders = outcome === "YES" ? book.yesSideOrders : book.noSideOrders;
+  return Math.min(bestExternalDepthUsd(orders.bids, walletAddress), bestExternalDepthUsd(orders.asks, walletAddress));
+}
+
+function outcomeIsTwoSided(book: AlphaOrderbook, outcome: AlphaOutcome, walletAddress?: string): boolean {
+  const outcomeBook = getOutcomeBook(book, outcome);
+  return (
+    outcomeBook.bid !== undefined &&
+    outcomeBook.ask !== undefined &&
+    outcomeBook.mid !== undefined &&
+    outcomeBook.spread !== undefined &&
+    outcomeDepthUsd(book, outcome, walletAddress) > 0
+  );
+}
+
+function updateSpreadMarketStats(
+  state: AlphaBotState,
+  scan: AlphaScanResult,
+  marketByAppId: Map<number, AlphaMarket>,
+  config: AlphaConfig,
+): number {
+  const now = new Date().toISOString();
+  let updated = 0;
+  for (const [marketAppId, book] of scan.orderbooks) {
+    const market = marketByAppId.get(marketAppId);
+    if (!market) continue;
+    const outcomes = (["YES", "NO"] as const)
+      .map((outcome) => {
+        const outcomeBook = getOutcomeBook(book, outcome);
+        return {
+          outcome,
+          twoSided: outcomeIsTwoSided(book, outcome, config.walletAddress),
+          depthUsd: outcomeDepthUsd(book, outcome, config.walletAddress),
+          spreadCents: outcomeBook.spread !== undefined ? outcomeBook.spread * 100 : undefined,
+        };
+      })
+      .filter((outcome) => outcome.twoSided);
+    const best = outcomes.sort((a, b) => b.depthUsd - a.depthUsd)[0];
+    const key = String(marketAppId);
+    const previous = state.spreadStatsByMarket[key];
+    const twoSided = best !== undefined;
+    state.spreadStatsByMarket[key] = {
+      marketId: market.id,
+      marketAppId,
+      title: market.title,
+      volume: market.volume,
+      observedScans: (previous?.observedScans ?? 0) + 1,
+      consecutiveTwoSidedScans: twoSided ? (previous?.consecutiveTwoSidedScans ?? 0) + 1 : 0,
+      bestDepthUsd: best?.depthUsd,
+      bestSpreadCents: best?.spreadCents,
+      lastTwoSidedAt: twoSided ? now : previous?.lastTwoSidedAt,
+      lastSeenAt: now,
+    };
+    updated += 1;
+  }
+  return updated;
+}
+
+function spreadEntryRejection(quote: AlphaQuote, state: AlphaBotState, config: AlphaConfig): string | undefined {
+  if (quote.source !== "spread" || quote.side !== "bid") return undefined;
+  const stats = state.spreadStatsByMarket[String(quote.marketAppId)];
+  if (!stats) return "spread market has not been observed yet";
+  if ((stats.volume ?? 0) < config.minSpreadVolumeUsd) {
+    return `volume ${(stats.volume ?? 0).toFixed(2)} below spread minimum ${config.minSpreadVolumeUsd.toFixed(2)}`;
+  }
+  if (stats.consecutiveTwoSidedScans < config.spreadPersistenceScans) {
+    return `two-sided book only persisted ${stats.consecutiveTwoSidedScans}/${config.spreadPersistenceScans} scan(s)`;
+  }
+  if ((stats.bestDepthUsd ?? 0) < config.minSpreadDepthUsd) {
+    return `visible same-outcome depth $${(stats.bestDepthUsd ?? 0).toFixed(2)} below minimum $${config.minSpreadDepthUsd.toFixed(2)}`;
+  }
+  if ((stats.bestSpreadCents ?? 0) < config.minSpreadCaptureCents) {
+    return `spread ${(stats.bestSpreadCents ?? 0).toFixed(2)}c below minimum ${config.minSpreadCaptureCents.toFixed(2)}c`;
+  }
+  return undefined;
+}
+
+function spreadQuoteQuality(quote: AlphaQuote, state: AlphaBotState): number {
+  const stats = state.spreadStatsByMarket[String(quote.marketAppId)];
+  if (!stats) return 0;
+  return Math.log10((stats.volume ?? 0) + 1) * 10 + (stats.bestDepthUsd ?? 0) + (stats.bestSpreadCents ?? 0);
 }
 
 function findMarketForPosition(
@@ -180,7 +386,7 @@ function describeMissingExit(
   if (!book) return "orderbook was not scanned for this market";
   const outcomeBook = getOutcomeBook(book, outcome);
   if (outcomeBook.mid === undefined) return "same-outcome midpoint unavailable";
-  const spreadMidpointAllowed = outcomeBook.mid >= config.minSpreadMidpoint && outcomeBook.mid <= config.maxSpreadMidpoint;
+  const spreadMidpointAllowed = outcomeBook.mid >= config.minSpreadExitMidpoint && outcomeBook.mid <= config.maxSpreadMidpoint;
   const rewardMidpointAllowed = outcomeBook.mid >= config.minMidpoint && outcomeBook.mid <= config.maxMidpoint;
   if (market.reward.isRewardMarket && market.reward.maxRewardSpreadCents !== undefined && rewardMidpointAllowed) {
     const rewardAsk = outcomeBook.mid + config.rewardZoneBufferCents / 100;
@@ -188,7 +394,7 @@ function describeMissingExit(
     return "reward-zone exit looked possible but no quote was produced";
   }
   if (!spreadMidpointAllowed) {
-    return `midpoint ${outcomeBook.mid.toFixed(3)} outside spread exit bounds ${config.minSpreadMidpoint.toFixed(3)}-${config.maxSpreadMidpoint.toFixed(3)}`;
+    return `midpoint ${outcomeBook.mid.toFixed(3)} outside spread exit bounds ${config.minSpreadExitMidpoint.toFixed(3)}-${config.maxSpreadMidpoint.toFixed(3)}`;
   }
   if (!config.enableSpreadCapture) return "spread capture is disabled";
   if (outcomeBook.bid === undefined || outcomeBook.ask === undefined || outcomeBook.spread === undefined) {
@@ -301,8 +507,15 @@ function rankDiversifiedQuotes(quotes: AlphaQuote[], state: AlphaBotState, confi
     return 3;
   };
 
+  const compareQuotes = (a: AlphaQuote, b: AlphaQuote): number => {
+    const scoreDiff = quoteScore(a) - quoteScore(b);
+    if (scoreDiff !== 0) return scoreDiff;
+    if (a.source === "spread" && b.source === "spread") return spreadQuoteQuality(b, state) - spreadQuoteQuality(a, state);
+    return b.notionalUsd - a.notionalUsd;
+  };
+
   for (const marketQuotes of groupedQuotes.values()) {
-    marketQuotes.sort((a, b) => quoteScore(a) - quoteScore(b));
+    marketQuotes.sort(compareQuotes);
     const openCount = openByMarket.get(marketQuotes[0]?.marketAppId ?? 0) ?? 0;
     const room = Math.max(0, config.maxLiveOrdersPerMarket - openCount);
     if (room <= 0) continue;
@@ -334,6 +547,7 @@ function rankDiversifiedQuotes(quotes: AlphaQuote[], state: AlphaBotState, confi
   }
 
   for (const marketQuotes of groupedQuotes.values()) {
+    marketQuotes.sort(compareQuotes);
     for (const quote of marketQuotes) {
       if (selected.includes(quote)) continue;
       const marketCount = (openByMarket.get(quote.marketAppId) ?? 0) + (selectedByMarket.get(quote.marketAppId) ?? 0);
@@ -367,28 +581,49 @@ export async function runLiveTick(
     marketByAppId.set(market.marketAppId, market);
   }
 
+  const beforePositions = snapshotPositions(state);
   const walletOrders = await loadWalletOpenOrders(liveClient, config.walletAddress, marketByAppId);
-  const syncedLiveOrders = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
+  const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
+  let walletPositions: PositionSnapshot = {};
+  let positionsSynced = false;
   try {
     const positions = await liveClient.getPositions(config.walletAddress);
+    walletPositions = walletPositionSnapshot(positions, marketByAppId);
+    positionsSynced = true;
     const syncedPositions = mergeLivePositionsFromWallet(state, positions, marketByAppId);
     actions.push({ kind: "skip", message: `Synced ${syncedPositions} live position(s) from wallet` });
   } catch (error) {
     actions.push({ kind: "skip", message: `Position sync skipped: ${error instanceof Error ? error.message : String(error)}` });
   }
+  if (positionsSynced) {
+    inferClosedLiveOrders(state, closedOrders, beforePositions, walletPositions, actions);
+  } else {
+    state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
+  }
+  const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
+  actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
 
   const quotes: AlphaQuote[] = [];
+  let blockedSpreadEntries = 0;
   for (const market of marketByAppId.values()) {
     const book = scan.orderbooks.get(market.marketAppId);
     if (!book) continue;
-    quotes.push(...generateQuotes(market, book, state, config));
+    for (const quote of generateQuotes(market, book, state, config)) {
+      const rejection = spreadEntryRejection(quote, state, config);
+      if (rejection) {
+        blockedSpreadEntries += 1;
+        actions.push({ kind: "skip", message: `Spread guardrail blocked ${quote.title} ${quote.outcome}: ${rejection}` });
+        continue;
+      }
+      quotes.push(quote);
+    }
   }
   actions.push({
     kind: "skip",
     message: `Generated ${quotes.length} quote candidate(s): reward=${quotes.filter((quote) => quote.source === "reward").length}, spread=${
       quotes.filter((quote) => quote.source === "spread").length
-    }, exits=${quotes.filter((quote) => quote.source === "inventory_exit").length}`,
+    }, exits=${quotes.filter((quote) => quote.source === "inventory_exit").length}, blockedSpreadEntries=${blockedSpreadEntries}`,
   });
   addInventoryExitDiagnostics(actions, state, quotes, scan, marketByAppId, config);
   const intendedQuoteByKey = new Map<string, AlphaQuote>();
@@ -476,6 +711,18 @@ export async function runLiveTick(
 
   const openLiveOrders = state.openOrders.filter((order) => order.runMode === "live" && order.status === "open" && order.liveEscrowAppId !== undefined);
   const slots = Math.max(0, config.maxLiveOpenOrders - openLiveOrders.length);
+  actions.push(
+    ...(await runParityLane({
+      scan,
+      state,
+      config,
+      liveClient,
+      mode,
+      walletUsdcBalanceUsd,
+      walletAlgoBalance,
+      availableSlots: slots,
+    })),
+  );
   if (slots === 0) {
     actions.push({ kind: "skip", message: "No live order slots available under ALGO MBR-aware cap" });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
@@ -483,6 +730,14 @@ export async function runLiveTick(
   }
 
   const rankedQuotes = rankDiversifiedQuotes(quotes, state, config);
+  const pendingExitSlots = Math.min(
+    config.spreadExitSlotReserve,
+    rankedQuotes.filter((quote) => quote.source === "inventory_exit").length,
+  );
+  const bidSlotLimit = Math.max(0, slots - pendingExitSlots);
+  if (pendingExitSlots > 0) {
+    actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} live order slot(s) for inventory exits` });
+  }
   const rewardWindow = rankedQuotes.slice(0, slots);
   const selectedRewardContractsByMarket = new Map<number, number>();
   for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open" && candidate.rewardEligible)) {
@@ -493,8 +748,13 @@ export async function runLiveTick(
   }
 
   let slotsUsed = 0;
+  let bidSlotsUsed = 0;
   for (const quote of rankedQuotes) {
     if (slotsUsed >= slots) break;
+    if (quote.side === "bid" && bidSlotsUsed >= bidSlotLimit) {
+      actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} bid skipped; remaining slot(s) reserved for inventory exits` });
+      continue;
+    }
     const aggregateRewardContracts = selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0;
     if (quote.source === "reward" && quote.rewardMinContracts !== undefined && aggregateRewardContracts < quote.rewardMinContracts) {
       actions.push({
@@ -516,6 +776,7 @@ export async function runLiveTick(
         )} / ${quote.sizeShares.toFixed(6)} shares; ${quote.reason}`,
       });
       slotsUsed += 1;
+      if (quote.side === "bid") bidSlotsUsed += 1;
       continue;
     }
     if (quote.side === "ask" && quote.source !== "inventory_exit") {
@@ -533,6 +794,7 @@ export async function runLiveTick(
       state.openOrders.push(toTrackedLiveOrder(quote, result));
       state.strategyStats.liveOrdersPlaced += 1;
       slotsUsed += 1;
+      if (quote.side === "bid") bidSlotsUsed += 1;
       actions.push({ kind: "place", message: `Placed ${quote.title} ${quote.outcome} ${quote.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);
     } catch (error) {

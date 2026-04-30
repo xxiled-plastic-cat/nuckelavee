@@ -1,4 +1,5 @@
-import type { AlphaBotState, AlphaMarket, AlphaOpportunity, AlphaOrderbook } from "./alphaTypes.js";
+import type { AlphaConfig } from "./alphaConfig.js";
+import type { AlphaBotState, AlphaMarket, AlphaOpportunity, AlphaOrderbook, AlphaParityPlan } from "./alphaTypes.js";
 import { summarizeBooks, type AlphaScanResult } from "./alphaMarketScanner.js";
 
 export function fmtUsd(value: number | undefined): string {
@@ -31,8 +32,83 @@ function spreadRows(scan: AlphaScanResult): Array<{ title: string; outcome: "YES
   return rows.sort((a, b) => b.spread - a.spread);
 }
 
-export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportunity[], parity: AlphaOpportunity[]): void {
+function fmtVolume(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  return `$${value.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+}
+
+function uniqueMarketsByVolume(scan: AlphaScanResult): AlphaMarket[] {
+  const markets = new Map<number, AlphaMarket>();
+  for (const market of [...scan.markets, ...scan.rewardMarkets]) {
+    const previous = markets.get(market.marketAppId);
+    markets.set(market.marketAppId, {
+      ...market,
+      reward: market.reward.isRewardMarket ? market.reward : (previous?.reward ?? market.reward),
+      volume: market.volume ?? previous?.volume,
+    });
+  }
+  return [...markets.values()].sort((a, b) => (b.volume ?? 0) - (a.volume ?? 0));
+}
+
+function bestDepthUsd(levels: Array<{ price: number; quantityShares: number }>): number {
+  const [level] = levels;
+  return level ? level.price * level.quantityShares : 0;
+}
+
+function outcomeDepthUsd(book: AlphaOrderbook, outcome: "YES" | "NO"): number {
+  const orders = outcome === "YES" ? book.yesSideOrders : book.noSideOrders;
+  return Math.min(bestDepthUsd(orders.bids), bestDepthUsd(orders.asks));
+}
+
+function bestSpreadMatch(
+  market: AlphaMarket,
+  book: AlphaOrderbook | undefined,
+  config: AlphaConfig,
+): { label: string; reason: string } {
+  if (!config.enableSpreadCapture) return { label: "off", reason: "disabled" };
+  if (!book || book.source === "unavailable") return { label: "no", reason: "book unavailable/not scanned" };
+  if ((market.volume ?? 0) < config.minSpreadVolumeUsd) return { label: "no", reason: `volume < $${config.minSpreadVolumeUsd.toFixed(2)}` };
+  const candidates = [
+    { outcome: "YES", bid: book.yesBid, ask: book.yesAsk, mid: book.yesMid, spread: book.yesSpread, depthUsd: outcomeDepthUsd(book, "YES") },
+    { outcome: "NO", bid: book.noBid, ask: book.noAsk, mid: book.noMid, spread: book.noSpread, depthUsd: outcomeDepthUsd(book, "NO") },
+  ] as const;
+  const matches = candidates
+    .filter(
+      (candidate) =>
+        candidate.bid !== undefined &&
+        candidate.ask !== undefined &&
+        candidate.mid !== undefined &&
+        candidate.spread !== undefined &&
+        candidate.spread * 100 >= config.minSpreadCaptureCents &&
+        candidate.depthUsd >= config.minSpreadDepthUsd &&
+        candidate.mid >= config.minSpreadEntryMidpoint &&
+        candidate.mid <= config.maxSpreadMidpoint,
+    )
+    .sort((a, b) => (b.spread ?? 0) - (a.spread ?? 0));
+  const best = matches[0];
+  if (best) return { label: "watch", reason: `${best.outcome} ${fmtCents(best.spread)} @ mid ${fmtPrice(best.mid)}, depth $${best.depthUsd.toFixed(2)}; needs ${config.spreadPersistenceScans} live scans` };
+  const twoSided = candidates.find((candidate) => candidate.bid !== undefined && candidate.ask !== undefined && candidate.mid !== undefined);
+  if (!twoSided) return { label: "no", reason: "no two-sided outcome" };
+  if ((twoSided.spread ?? 0) * 100 < config.minSpreadCaptureCents) return { label: "no", reason: `spread < ${config.minSpreadCaptureCents.toFixed(2)}c` };
+  if (twoSided.depthUsd < config.minSpreadDepthUsd) return { label: "no", reason: `depth < $${config.minSpreadDepthUsd.toFixed(2)}` };
+  return { label: "no", reason: `mid outside ${fmtPrice(config.minSpreadEntryMidpoint)}-${fmtPrice(config.maxSpreadMidpoint)}` };
+}
+
+function rewardMatch(
+  market: AlphaMarket,
+  rewardByMarketAppId: Map<number, AlphaOpportunity>,
+): { label: string; reason: string } {
+  if (!market.reward.isRewardMarket) return { label: "no", reason: "not reward market" };
+  const candidate = rewardByMarketAppId.get(market.marketAppId);
+  if (!candidate) return { label: "watch", reason: "reward metadata incomplete" };
+  if (candidate.warnings.length === 0) return { label: "good", reason: `daily ${fmtUsd(candidate.reward.estimatedRewardUsdPerDay)}` };
+  return { label: "watch", reason: candidate.warnings.join("; ") };
+}
+
+export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportunity[], parity: AlphaParityPlan[], config: AlphaConfig): void {
   const surface = summarizeBooks(scan.orderbooks.values());
+  const rewardByMarketAppId = new Map(rewardCandidates.map((candidate) => [candidate.marketAppId, candidate]));
+  const marketRows = uniqueMarketsByVolume(scan);
   console.log("NUCKELAVEE / ALPHA ARCADE");
   console.log("");
   console.log(`Markets loaded: ${scan.markets.length}`);
@@ -63,6 +139,24 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
     );
   }
   if (spreadRows(scan).length === 0) console.log("- none");
+  console.log("");
+  console.log("Top parity / merge candidates:");
+  for (const plan of parity.slice(0, 8)) {
+    console.log(
+      `- ${plan.title} ${plan.type} YES=${fmtPrice(plan.yesPrice)} NO=${fmtPrice(plan.noPrice)} size=${plan.sizeShares.toFixed(
+        6,
+      )} gross=${fmtUsd(plan.expectedGrossPnlUsd)} netEdge=${plan.estimatedNetEdgeBps.toFixed(0)}bps`,
+    );
+  }
+  if (parity.length === 0) console.log("- none");
+  console.log("");
+  console.log("Markets by volume:");
+  for (const market of marketRows) {
+    const reward = rewardMatch(market, rewardByMarketAppId);
+    const spread = bestSpreadMatch(market, scan.orderbooks.get(market.marketAppId), config);
+    console.log(`- ${market.title} volume=${fmtVolume(market.volume)} rewards=${reward.label} (${reward.reason}) spread=${spread.label} (${spread.reason})`);
+  }
+  if (marketRows.length === 0) console.log("- none");
   console.log("");
   console.log(`Parity / split-merge candidates: ${parity.length}`);
 }
@@ -135,9 +229,11 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
       exposure,
     )} realisedPnl=${fmtUsd(state.realisedPnl)} unrealisedPnl=${fmtUsd(state.unrealisedPnl)} tradingPnl=${fmtUsd(
       state.totalPnl,
-    )} estRewards=${fmtUsd(state.estimatedRewardsUsd)} livePlaced=${state.strategyStats.liveOrdersPlaced} liveCancelled=${
-      state.strategyStats.liveOrdersCancelled
-    }`,
+    )} spreadPnl=${fmtUsd(state.strategyStats.spreadRealisedPnl)} spreadFills=${state.strategyStats.spreadEntryFills}/${
+      state.strategyStats.spreadExitFills
+    } parityPnl=${fmtUsd(state.strategyStats.parityGrossPnl)} parityTrades=${state.strategyStats.parityTradesExecuted} parityFailed=${
+      state.strategyStats.parityFailedLegs
+    } estRewards=${fmtUsd(state.estimatedRewardsUsd)} livePlaced=${state.strategyStats.liveOrdersPlaced} liveCancelled=${state.strategyStats.liveOrdersCancelled}`,
   );
 }
 
