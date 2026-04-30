@@ -44,6 +44,11 @@ function normalizeUsd(value: unknown): number | undefined {
   return value > 10_000 ? value / MICRO : value;
 }
 
+function normalizeMarketVolumeUsd(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return value > 10_000_000 ? value / MICRO : value;
+}
+
 function normalizeRewardSpreadCents(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
   if (value > 10_000) return (value / MICRO) * 100;
@@ -104,7 +109,7 @@ function flattenMarket(market: Market): AlphaMarket[] {
       resolved: Boolean(market.isResolved),
       yesPrice: normalizeApiPrice(option.yesProb),
       noPrice: normalizeApiPrice(option.noProb),
-      volume: normalizeUsd(market.volume),
+      volume: normalizeMarketVolumeUsd(market.volume),
       reward: toRewardInfo(option),
       raw: { market, option },
     }));
@@ -122,7 +127,7 @@ function flattenMarket(market: Market): AlphaMarket[] {
       resolved: Boolean(market.isResolved),
       yesPrice: normalizeApiPrice(market.yesProb),
       noPrice: normalizeApiPrice(market.noProb),
-      volume: normalizeUsd(market.volume),
+      volume: normalizeMarketVolumeUsd(market.volume),
       reward: toRewardInfo(market),
       raw: market,
     },

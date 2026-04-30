@@ -16,17 +16,36 @@ export function fmtCents(value: number | undefined): string {
   return value === undefined || !Number.isFinite(value) ? "unknown" : `${(value * 100).toFixed(2)}c`;
 }
 
-function spreadRows(scan: AlphaScanResult): Array<{ title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> {
+function spreadRows(
+  scan: AlphaScanResult,
+): Array<{ marketAppId: number; title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> {
   const marketByAppId = new Map([...scan.markets, ...scan.rewardMarkets].map((market) => [market.marketAppId, market]));
-  const rows: Array<{ title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> = [];
+  const rows: Array<{ marketAppId: number; title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> =
+    [];
   for (const book of scan.orderbooks.values()) {
     const market = marketByAppId.get(book.marketAppId);
     if (!market) continue;
     if (book.yesBid !== undefined && book.yesAsk !== undefined && book.yesMid !== undefined && book.yesSpread !== undefined) {
-      rows.push({ title: market.title, outcome: "YES", bid: book.yesBid, ask: book.yesAsk, spread: book.yesSpread, midpoint: book.yesMid });
+      rows.push({
+        marketAppId: market.marketAppId,
+        title: market.title,
+        outcome: "YES",
+        bid: book.yesBid,
+        ask: book.yesAsk,
+        spread: book.yesSpread,
+        midpoint: book.yesMid,
+      });
     }
     if (book.noBid !== undefined && book.noAsk !== undefined && book.noMid !== undefined && book.noSpread !== undefined) {
-      rows.push({ title: market.title, outcome: "NO", bid: book.noBid, ask: book.noAsk, spread: book.noSpread, midpoint: book.noMid });
+      rows.push({
+        marketAppId: market.marketAppId,
+        title: market.title,
+        outcome: "NO",
+        bid: book.noBid,
+        ask: book.noAsk,
+        spread: book.noSpread,
+        midpoint: book.noMid,
+      });
     }
   }
   return rows.sort((a, b) => b.spread - a.spread);
@@ -125,7 +144,7 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
   console.log("Top LP reward candidates:");
   for (const candidate of rewardCandidates.slice(0, 8)) {
     console.log(
-      `- ${candidate.title} daily=${fmtUsd(candidate.reward.estimatedRewardUsdPerDay)} zone=${
+      `- marketAppId=${candidate.marketAppId} ${candidate.title} daily=${fmtUsd(candidate.reward.estimatedRewardUsdPerDay)} zone=${
         candidate.reward.rewardZoneDistanceCents?.toFixed(2) ?? "unknown"
       }c competition=${candidate.reward.competitionLevel ?? "unknown"}`,
     );
@@ -135,7 +154,9 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
   console.log("Top spread candidates:");
   for (const row of spreadRows(scan).slice(0, 8)) {
     console.log(
-      `- ${row.title} ${row.outcome} bid=${fmtPrice(row.bid)} ask=${fmtPrice(row.ask)} mid=${fmtPrice(row.midpoint)} spread=${fmtCents(row.spread)}`,
+      `- marketAppId=${row.marketAppId} ${row.title} ${row.outcome} bid=${fmtPrice(row.bid)} ask=${fmtPrice(row.ask)} mid=${fmtPrice(
+        row.midpoint,
+      )} spread=${fmtCents(row.spread)}`,
     );
   }
   if (spreadRows(scan).length === 0) console.log("- none");
@@ -143,7 +164,7 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
   console.log("Top parity / merge candidates:");
   for (const plan of parity.slice(0, 8)) {
     console.log(
-      `- ${plan.title} ${plan.type} YES=${fmtPrice(plan.yesPrice)} NO=${fmtPrice(plan.noPrice)} size=${plan.sizeShares.toFixed(
+      `- marketAppId=${plan.marketAppId} ${plan.title} ${plan.type} YES=${fmtPrice(plan.yesPrice)} NO=${fmtPrice(plan.noPrice)} size=${plan.sizeShares.toFixed(
         6,
       )} gross=${fmtUsd(plan.expectedGrossPnlUsd)} netEdge=${plan.estimatedNetEdgeBps.toFixed(0)}bps`,
     );
@@ -154,7 +175,9 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
   for (const market of marketRows) {
     const reward = rewardMatch(market, rewardByMarketAppId);
     const spread = bestSpreadMatch(market, scan.orderbooks.get(market.marketAppId), config);
-    console.log(`- ${market.title} volume=${fmtVolume(market.volume)} rewards=${reward.label} (${reward.reason}) spread=${spread.label} (${spread.reason})`);
+    console.log(
+      `- marketAppId=${market.marketAppId} ${market.title} volume=${fmtVolume(market.volume)} rewards=${reward.label} (${reward.reason}) spread=${spread.label} (${spread.reason})`,
+    );
   }
   if (marketRows.length === 0) console.log("- none");
   console.log("");
