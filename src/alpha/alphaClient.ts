@@ -39,6 +39,11 @@ function normalizeRewardSpreadCents(value: unknown): number | undefined {
   return value;
 }
 
+function normalizeContracts(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+  return value > 10_000 ? value / MICRO : value;
+}
+
 function inferCompetition(market: Market | MarketOption): AlphaRewardInfo["competitionLevel"] {
   const raw = market.competitionLevel;
   if (raw === "low" || raw === "medium" || raw === "high") return raw;
@@ -61,7 +66,7 @@ function toRewardInfo(market: Market | MarketOption): AlphaRewardInfo {
     dailyRewardsUsd: normalizeUsd(looseMarket.dailyRewards ?? looseMarket.dailyReward ?? looseMarket.rewardPerDay ?? looseMarket.totalRewards),
     lastPayoutUsd: normalizeUsd(market.lastRewardAmount),
     maxRewardSpreadCents: normalizeRewardSpreadCents(market.rewardsSpreadDistance),
-    minContracts: typeof market.rewardsMinContracts === "number" ? market.rewardsMinContracts : undefined,
+    minContracts: normalizeContracts(market.rewardsMinContracts),
     competitionLevel: inferCompetition(market),
   };
 }
@@ -218,6 +223,10 @@ export class AlphaSdkClient {
     return this.client.getOpenOrders(marketAppId, walletAddress);
   }
 
+  async getWalletOpenOrders(walletAddress: string): Promise<OpenOrder[]> {
+    return this.client.getWalletOrdersFromApi(walletAddress);
+  }
+
   async getUsdcBalance(walletAddress: string): Promise<number | undefined> {
     try {
       const result = (await this.algodClient.accountAssetInformation(walletAddress, this.usdcAssetId).do()) as {
@@ -228,6 +237,18 @@ export class AlphaSdkClient {
       const amount = result.assetHolding?.amount ?? result.assetHoldingInfo?.amount ?? result.amount;
       if (amount === undefined) return 0;
       return Number(amount) / MICRO;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async getAlgoBalance(walletAddress: string): Promise<number | undefined> {
+    try {
+      const result = (await this.algodClient.accountInformation(walletAddress).do()) as {
+        amount?: number | bigint;
+      };
+      if (result.amount === undefined) return 0;
+      return Number(result.amount) / MICRO;
     } catch {
       return undefined;
     }

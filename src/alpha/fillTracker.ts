@@ -74,7 +74,7 @@ export function detectPaperFills(state: AlphaBotState, books: Map<number, AlphaO
   return fills;
 }
 
-export function cancelStalePaperOrders(state: AlphaBotState, staleOrderSeconds: number): AlphaPaperOrder[] {
+export function cancelStalePaperOrders(state: AlphaBotState, staleOrderSeconds = 45): AlphaPaperOrder[] {
   const now = Date.now();
   const cancelled: AlphaPaperOrder[] = [];
   for (const order of state.openOrders) {

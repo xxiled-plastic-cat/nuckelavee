@@ -73,10 +73,14 @@ export function checkQuoteRisk(
   if (quote.rewardEligible === false && quote.source === "reward") {
     return { allowed: false, reason: "reward quote would sit outside reward zone", riskLevel: "medium" };
   }
-  if (getMarketExposure(state, quote.marketId, mode) + quote.notionalUsd > config.maxMarketExposureUsd) {
+  const addedExposure = quote.side === "bid" ? quote.notionalUsd : 0;
+  if (getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxMarketExposureUsd) {
     return { allowed: false, reason: "market exposure would exceed cap", riskLevel: "high" };
   }
-  if (getTotalExposure(state, mode) + quote.notionalUsd > config.maxTotalExposureUsd) {
+  if (quote.source === "spread" && getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxSpreadMarketExposureUsd) {
+    return { allowed: false, reason: "spread market exposure would exceed cap", riskLevel: "medium" };
+  }
+  if (getTotalExposure(state, mode) + addedExposure > config.maxTotalExposureUsd) {
     return { allowed: false, reason: "total exposure would exceed cap", riskLevel: "high" };
   }
   if (mode === "paper" && quote.side === "bid" && quote.notionalUsd > state.cash) {

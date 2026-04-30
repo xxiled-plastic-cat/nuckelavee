@@ -79,7 +79,7 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
     console.log(`[${action.kind.toUpperCase()}] ${action.message}`);
   }
   if (result.actions.length === 0) console.log("No actions.");
-  printLiveSummary(result.state, result.walletUsdcBalanceUsd);
+  printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance);
 }
 
 function printUsage(): void {

@@ -15,6 +15,22 @@ export function fmtCents(value: number | undefined): string {
   return value === undefined || !Number.isFinite(value) ? "unknown" : `${(value * 100).toFixed(2)}c`;
 }
 
+function spreadRows(scan: AlphaScanResult): Array<{ title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> {
+  const marketByAppId = new Map([...scan.markets, ...scan.rewardMarkets].map((market) => [market.marketAppId, market]));
+  const rows: Array<{ title: string; outcome: "YES" | "NO"; bid: number; ask: number; spread: number; midpoint: number }> = [];
+  for (const book of scan.orderbooks.values()) {
+    const market = marketByAppId.get(book.marketAppId);
+    if (!market) continue;
+    if (book.yesBid !== undefined && book.yesAsk !== undefined && book.yesMid !== undefined && book.yesSpread !== undefined) {
+      rows.push({ title: market.title, outcome: "YES", bid: book.yesBid, ask: book.yesAsk, spread: book.yesSpread, midpoint: book.yesMid });
+    }
+    if (book.noBid !== undefined && book.noAsk !== undefined && book.noMid !== undefined && book.noSpread !== undefined) {
+      rows.push({ title: market.title, outcome: "NO", bid: book.noBid, ask: book.noAsk, spread: book.noSpread, midpoint: book.noMid });
+    }
+  }
+  return rows.sort((a, b) => b.spread - a.spread);
+}
+
 export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportunity[], parity: AlphaOpportunity[]): void {
   const surface = summarizeBooks(scan.orderbooks.values());
   console.log("NUCKELAVEE / ALPHA ARCADE");
@@ -40,6 +56,14 @@ export function printScan(scan: AlphaScanResult, rewardCandidates: AlphaOpportun
   }
   if (rewardCandidates.length === 0) console.log("- none");
   console.log("");
+  console.log("Top spread candidates:");
+  for (const row of spreadRows(scan).slice(0, 8)) {
+    console.log(
+      `- ${row.title} ${row.outcome} bid=${fmtPrice(row.bid)} ask=${fmtPrice(row.ask)} mid=${fmtPrice(row.midpoint)} spread=${fmtCents(row.spread)}`,
+    );
+  }
+  if (spreadRows(scan).length === 0) console.log("- none");
+  console.log("");
   console.log(`Parity / split-merge candidates: ${parity.length}`);
 }
 
@@ -56,6 +80,8 @@ export function printRewards(rewardMarkets: AlphaMarket[], candidates: AlphaOppo
     console.log(`Daily rewards: ${fmtUsd(candidate.reward.estimatedRewardUsdPerDay)}`);
     console.log(`Competition: ${candidate.reward.competitionLevel ?? "unknown"}`);
     console.log(`Max reward spread: ${candidate.reward.rewardZoneDistanceCents?.toFixed(2) ?? "unknown"}c`);
+    const minContracts = rewardMarkets.find((market) => market.marketAppId === candidate.marketAppId)?.reward.minContracts;
+    console.log(`Min aggregate reward size: ${minContracts?.toFixed(6) ?? "unknown"} contracts`);
     console.log(`Reason: ${candidate.reason}`);
     if (candidate.warnings.length > 0) console.log(`Warnings: ${candidate.warnings.join("; ")}`);
     console.log("");
@@ -74,6 +100,7 @@ export function printMarketDetail(market: AlphaMarket, book: AlphaOrderbook | un
   console.log(`LP rewards: ${market.reward.isRewardMarket ? "yes" : "no"}`);
   console.log(`Daily rewards: ${fmtUsd(market.reward.dailyRewardsUsd)}`);
   console.log(`Max reward spread: ${market.reward.maxRewardSpreadCents?.toFixed(2) ?? "unknown"}c`);
+  console.log(`Min aggregate reward size: ${market.reward.minContracts?.toFixed(6) ?? "unknown"} contracts`);
   console.log(`Competition: ${market.reward.competitionLevel ?? "unknown"}`);
   console.log("");
   if (!book) {
@@ -96,7 +123,7 @@ export function printPaperWatch(state: AlphaBotState): void {
   );
 }
 
-export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: number): void {
+export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number): void {
   const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
   const rewardEligible = open.filter((order) => order.rewardEligible).length;
   const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
@@ -104,7 +131,7 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
   console.log(
     `[${new Date().toISOString().slice(11, 19)}] liveSummary walletUsdc=${fmtUsd(
       walletUsdcBalanceUsd,
-    )} openOrders=${open.length} rewardEligible=${rewardEligible} exposure=${fmtUsd(
+    )} walletAlgo=${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)} openOrders=${open.length} rewardEligible=${rewardEligible} exposure=${fmtUsd(
       exposure,
     )} realisedPnl=${fmtUsd(state.realisedPnl)} unrealisedPnl=${fmtUsd(state.unrealisedPnl)} tradingPnl=${fmtUsd(
       state.totalPnl,

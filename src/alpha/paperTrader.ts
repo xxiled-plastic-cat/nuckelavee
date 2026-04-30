@@ -35,7 +35,7 @@ export async function runPaperTick(scan: AlphaScanResult, config: AlphaConfig): 
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
   accrueEstimatedRewards(state, config);
   detectPaperFills(state, scan.orderbooks);
-  cancelStalePaperOrders(state, config.staleOrderSeconds);
+  cancelStalePaperOrders(state);
   updateUnrealisedPnl(state, scan.orderbooks);
 
   const marketByAppId = new Map<number, AlphaMarket>();

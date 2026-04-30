@@ -9,6 +9,7 @@ export type AlphaConfig = {
   matcherAppId: number;
   usdcAssetId: number;
   scanOrderbookLimit: number;
+  spreadScanOrderbookLimit: number;
   maxMarketsPerScan: number;
   scanIntervalMs: number;
   streamTimeoutMs: number;
@@ -20,6 +21,15 @@ export type AlphaConfig = {
   minEdgeBps: number;
   parityBufferBps: number;
   minMakerSpreadCents: number;
+  enableSpreadCapture: boolean;
+  spreadOrderSizeUsd: number;
+  minSpreadCaptureCents: number;
+  spreadEntryMinDwellSeconds: number;
+  spreadExitEdgeCents: number;
+  spreadExitMinDwellSeconds: number;
+  minSpreadMidpoint: number;
+  maxSpreadMidpoint: number;
+  maxSpreadMarketExposureUsd: number;
   minTimeToCloseMinutes: number;
   maxTimeToCloseHours: number;
   minMidpoint: number;
@@ -30,8 +40,11 @@ export type AlphaConfig = {
   maxTotalExposureUsd: number;
   maxOpenOrders: number;
   maxLiveOpenOrders: number;
+  maxLiveOrdersPerMarket: number;
+  quoteRefreshThresholdCents: number;
+  minAlgoBalance: number;
+  rewardMinDwellSeconds: number;
   orderRefreshMs: number;
-  staleOrderSeconds: number;
   paperStartingBalanceUsd: number;
   enableLiveTrading: boolean;
   confirmRisk: boolean;
@@ -78,6 +91,7 @@ export function readAlphaConfig(): AlphaConfig {
     matcherAppId: readInt("ALPHA_MATCHER_APP_ID", 3_078_581_851),
     usdcAssetId: readInt("ALPHA_USDC_ASSET_ID", 31_566_704),
     scanOrderbookLimit: readInt("ALPHA_SCAN_ORDERBOOK_LIMIT", 25),
+    spreadScanOrderbookLimit: readInt("ALPHA_SPREAD_SCAN_ORDERBOOK_LIMIT", 75),
     maxMarketsPerScan: readInt("ALPHA_MAX_MARKETS_PER_SCAN", 100),
     scanIntervalMs: readInt("ALPHA_SCAN_INTERVAL_MS", 10_000),
     streamTimeoutMs: readInt("ALPHA_STREAM_TIMEOUT_MS", 15_000),
@@ -89,18 +103,30 @@ export function readAlphaConfig(): AlphaConfig {
     minEdgeBps: readNumber("ALPHA_MIN_EDGE_BPS", 75),
     parityBufferBps: readNumber("ALPHA_PARITY_BUFFER_BPS", 75),
     minMakerSpreadCents: readNumber("ALPHA_MIN_MAKER_SPREAD_CENTS", 4),
+    enableSpreadCapture: readBool("ALPHA_ENABLE_SPREAD_CAPTURE", true),
+    spreadOrderSizeUsd: readNumber("ALPHA_SPREAD_ORDER_SIZE_USD", 1),
+    minSpreadCaptureCents: readNumber("ALPHA_MIN_SPREAD_CAPTURE_CENTS", 0.5),
+    spreadEntryMinDwellSeconds: readInt("ALPHA_SPREAD_ENTRY_MIN_DWELL_SECONDS", 600),
+    spreadExitEdgeCents: readNumber("ALPHA_SPREAD_EXIT_EDGE_CENTS", 1),
+    spreadExitMinDwellSeconds: readInt("ALPHA_SPREAD_EXIT_MIN_DWELL_SECONDS", 1_800),
+    minSpreadMidpoint: readNumber("ALPHA_MIN_SPREAD_MIDPOINT", 0.01),
+    maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),
+    maxSpreadMarketExposureUsd: readNumber("ALPHA_MAX_SPREAD_MARKET_EXPOSURE_USD", 2),
     minTimeToCloseMinutes: readNumber("ALPHA_MIN_TIME_TO_CLOSE_MINUTES", 60),
     maxTimeToCloseHours: readNumber("ALPHA_MAX_TIME_TO_CLOSE_HOURS", 168),
     minMidpoint: readNumber("ALPHA_MIN_MIDPOINT", 0.2),
     maxMidpoint: readNumber("ALPHA_MAX_MIDPOINT", 0.8),
-    targetQuoteSizeUsd: readNumber("ALPHA_TARGET_QUOTE_SIZE_USD", 1),
-    maxOrderSizeUsd: readNumber("ALPHA_MAX_ORDER_SIZE_USD", 1),
-    maxMarketExposureUsd: readNumber("ALPHA_MAX_MARKET_EXPOSURE_USD", 3),
-    maxTotalExposureUsd: readNumber("ALPHA_MAX_TOTAL_EXPOSURE_USD", 10),
+    targetQuoteSizeUsd: readNumber("ALPHA_TARGET_QUOTE_SIZE_USD", 3),
+    maxOrderSizeUsd: readNumber("ALPHA_MAX_ORDER_SIZE_USD", 3),
+    maxMarketExposureUsd: readNumber("ALPHA_MAX_MARKET_EXPOSURE_USD", 6),
+    maxTotalExposureUsd: readNumber("ALPHA_MAX_TOTAL_EXPOSURE_USD", 12),
     maxOpenOrders: readInt("ALPHA_MAX_OPEN_ORDERS", 10),
-    maxLiveOpenOrders: readInt("ALPHA_MAX_LIVE_OPEN_ORDERS", 4),
+    maxLiveOpenOrders: readInt("ALPHA_MAX_LIVE_OPEN_ORDERS", 6),
+    maxLiveOrdersPerMarket: readInt("ALPHA_MAX_LIVE_ORDERS_PER_MARKET", 2),
+    quoteRefreshThresholdCents: readNumber("ALPHA_QUOTE_REFRESH_THRESHOLD_CENTS", 1),
+    minAlgoBalance: readNumber("ALPHA_MIN_ALGO_BALANCE", 3),
+    rewardMinDwellSeconds: readInt("ALPHA_REWARD_MIN_DWELL_SECONDS", 180),
     orderRefreshMs: readInt("ALPHA_ORDER_REFRESH_MS", 15_000),
-    staleOrderSeconds: readInt("ALPHA_STALE_ORDER_SECONDS", 45),
     paperStartingBalanceUsd: readNumber("ALPHA_PAPER_STARTING_BALANCE_USD", 50),
     enableLiveTrading: readBool("ALPHA_ENABLE_LIVE_TRADING", false),
     confirmRisk: readBool("ALPHA_CONFIRM_RISK", false),
@@ -118,10 +144,11 @@ export function validateLiveConfig(config: AlphaConfig): void {
   if (!config.confirmRisk) failures.push("ALPHA_CONFIRM_RISK must be true");
   if (!config.walletAddress) failures.push("ALPHA_WALLET_ADDRESS or a mnemonic-derived address is required");
   if (!config.walletMnemonic) failures.push("ALPHA_WALLET_MNEMONIC or PAYER_MNEMONIC is required");
-  if (config.maxOrderSizeUsd > 1) failures.push("ALPHA_MAX_ORDER_SIZE_USD must be <= 1 for first rollout");
-  if (config.maxMarketExposureUsd > 3) failures.push("ALPHA_MAX_MARKET_EXPOSURE_USD must be <= 3 for first rollout");
-  if (config.maxTotalExposureUsd > 10) failures.push("ALPHA_MAX_TOTAL_EXPOSURE_USD must be <= 10 for first rollout");
-  if (config.maxLiveOpenOrders > 4) failures.push("ALPHA_MAX_LIVE_OPEN_ORDERS must be <= 4 for first rollout");
+  if (config.maxOrderSizeUsd > 3) failures.push("ALPHA_MAX_ORDER_SIZE_USD must be <= 3 for first rollout");
+  if (config.maxMarketExposureUsd > 6) failures.push("ALPHA_MAX_MARKET_EXPOSURE_USD must be <= 6 for first rollout");
+  if (config.maxTotalExposureUsd > 12) failures.push("ALPHA_MAX_TOTAL_EXPOSURE_USD must be <= 12 for first rollout");
+  if (config.maxLiveOpenOrders > 6) failures.push("ALPHA_MAX_LIVE_OPEN_ORDERS must be <= 6 for first rollout");
+  if (config.maxLiveOrdersPerMarket > 2) failures.push("ALPHA_MAX_LIVE_ORDERS_PER_MARKET must be <= 2 for first rollout");
   if (failures.length > 0) {
     throw new Error(`Live mode refused to start:\n- ${failures.join("\n- ")}`);
   }

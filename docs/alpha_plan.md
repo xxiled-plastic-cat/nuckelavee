@@ -192,7 +192,8 @@ Alpha SDK/MCP facts to respect:
 - WebSocket orderbook streams use slug.
 - WebSocket orderbook streams can provide fresher data than on-chain reads.
 - Reward markets pay USDC to qualifying liquidity providers hourly according to Alpha's reward rules.
-- Reward eligibility depends on resting limit orders being close enough to the market midpoint, inside each market's max spread / reward zone.
+- Reward eligibility depends on resting limit orders being close enough to the market midpoint, inside each market's max spread / reward zone, meeting the market's minimum aggregate contract size for the wallet/market, and resting for at least 3 minutes.
+- LP provision on both YES and NO is more favorable than one-sided liquidity, so live selection should prefer paired reward-qualified quotes where caps allow.
 - Trading tools require wallet credentials.
 ```
 
@@ -239,6 +240,7 @@ Create Alpha-specific config.
 ALPHA_API_KEY=
 
 ALPHA_SCAN_ORDERBOOK_LIMIT=25
+ALPHA_SPREAD_SCAN_ORDERBOOK_LIMIT=75
 ALPHA_MAX_MARKETS_PER_SCAN=100
 ALPHA_SCAN_INTERVAL_MS=10000
 ALPHA_STREAM_TIMEOUT_MS=15000
@@ -252,21 +254,34 @@ ALPHA_MAX_REWARD_COMPETITION=medium
 ALPHA_MIN_EDGE_BPS=75
 ALPHA_PARITY_BUFFER_BPS=75
 ALPHA_MIN_MAKER_SPREAD_CENTS=4
+ALPHA_ENABLE_SPREAD_CAPTURE=true
+ALPHA_SPREAD_SCAN_ORDERBOOK_LIMIT=75
+ALPHA_SPREAD_ORDER_SIZE_USD=1
+ALPHA_MIN_SPREAD_CAPTURE_CENTS=0.5
+ALPHA_SPREAD_ENTRY_MIN_DWELL_SECONDS=600
+ALPHA_SPREAD_EXIT_EDGE_CENTS=1
+ALPHA_SPREAD_EXIT_MIN_DWELL_SECONDS=1800
+ALPHA_MIN_SPREAD_MIDPOINT=0.01
+ALPHA_MAX_SPREAD_MIDPOINT=0.99
+ALPHA_MAX_SPREAD_MARKET_EXPOSURE_USD=2
 ALPHA_MIN_TIME_TO_CLOSE_MINUTES=60
 ALPHA_MAX_TIME_TO_CLOSE_HOURS=168
 
 ALPHA_MIN_MIDPOINT=0.20
 ALPHA_MAX_MIDPOINT=0.80
 
-ALPHA_TARGET_QUOTE_SIZE_USD=1
-ALPHA_MAX_ORDER_SIZE_USD=1
-ALPHA_MAX_MARKET_EXPOSURE_USD=3
-ALPHA_MAX_TOTAL_EXPOSURE_USD=10
+ALPHA_TARGET_QUOTE_SIZE_USD=3
+ALPHA_MAX_ORDER_SIZE_USD=3
+ALPHA_MAX_MARKET_EXPOSURE_USD=6
+ALPHA_MAX_TOTAL_EXPOSURE_USD=12
 ALPHA_MAX_OPEN_ORDERS=10
-ALPHA_MAX_LIVE_OPEN_ORDERS=4
+ALPHA_MAX_LIVE_OPEN_ORDERS=6
+ALPHA_MAX_LIVE_ORDERS_PER_MARKET=2
 
 ALPHA_ORDER_REFRESH_MS=15000
-ALPHA_STALE_ORDER_SECONDS=45
+ALPHA_QUOTE_REFRESH_THRESHOLD_CENTS=1
+ALPHA_MIN_ALGO_BALANCE=3
+ALPHA_REWARD_MIN_DWELL_SECONDS=180
 
 ALPHA_PAPER_STARTING_BALANCE_USD=50
 
@@ -627,6 +642,7 @@ For every reward market or tradeable option, compute:
 - remainingRewardsUsd if computable
 - lastPayoutUsd if available
 - maxRewardSpreadCents if available
+- minContracts / minimum aggregate reward contract size if available
 - competitionLevel if available
 - midpoint
 - reward zone:
@@ -634,6 +650,8 @@ For every reward market or tradeable option, compute:
   - lower = midpoint - maxRewardSpread
   - upper = midpoint + maxRewardSpread
 - whether current proposed quote is inside reward zone
+- whether aggregate wallet/address resting contracts in the market meet the market minimum
+- whether the order has rested for at least 3 minutes before counting estimated rewards
 - estimated share of rewards if enough data is available
 ```
 
@@ -645,7 +663,9 @@ Rank higher for:
 - lower competition
 - larger remaining reward pool
 - practical maxRewardSpreadCents
+- smaller aggregate minimum reward contract size that fits within configured caps
 - stable midpoint
+- ability to quote both YES and NO reward-eligible sides
 - two-sided book with enough depth to avoid accidental crossing
 - markets with recent payouts
 
@@ -886,10 +906,26 @@ Reward quote rules:
 ```text
 - The quote must remain inside the market's max reward spread / reward zone.
 - The quote must not cross the current book.
+- The market's minimum aggregate reward contract size is checked across all eligible wallet orders in that market.
 - If preferredBid would cross the ask, move it down or reject.
 - If preferredAsk would cross the bid, move it up or reject.
 - If no reward-zone metadata is available, do not estimate rewards for that market.
 - It is better to miss a reward than to place a quote that creates obvious adverse-selection risk.
+```
+
+Spread capture quote rules:
+
+```text
+- Spread capture is independent from LP reward eligibility.
+- Use ALPHA_SPREAD_ORDER_SIZE_USD for spread-entry bids.
+- Only quote spread entries when the outcome has a true two-sided book.
+- The outcome spread must be at least ALPHA_MIN_SPREAD_CAPTURE_CENTS.
+- The outcome midpoint must be within ALPHA_MIN_SPREAD_MIDPOINT and ALPHA_MAX_SPREAD_MIDPOINT, which are separate from reward midpoint filters.
+- Place the bid inside the spread near midpoint, with ALPHA_SPREAD_EXIT_EDGE_CENTS reserved for exit edge.
+- Keep spread-entry bids resting for at least ALPHA_SPREAD_ENTRY_MIN_DWELL_SECONDS unless filled or clearly unsafe.
+- If inventory exists, generate an inventory_exit ask only up to verified wallet/state inventory.
+- Keep inventory_exit asks resting for at least ALPHA_SPREAD_EXIT_MIN_DWELL_SECONDS unless filled or clearly unsafe.
+- Spread orders remain subject to ALPHA_MAX_SPREAD_MARKET_EXPOSURE_USD, market cap, total cap, and open-order caps.
 ```
 
 Quotes are outcome-specific:
@@ -931,6 +967,12 @@ Sizing:
 ```text
 sizeShares = min(ALPHA_TARGET_QUOTE_SIZE_USD, ALPHA_MAX_ORDER_SIZE_USD) / quotePrice
 notionalUsd = quotePrice * sizeShares
+```
+
+Spread-entry sizing:
+
+```text
+sizeShares = min(ALPHA_SPREAD_ORDER_SIZE_USD, ALPHA_MAX_ORDER_SIZE_USD) / quotePrice
 ```
 
 For paper mode, round `sizeShares` down to 6 decimals and persist both `sizeShares` and `notionalUsd`.
@@ -1210,12 +1252,22 @@ Paper and live-dry-run should use the same intended lifecycle.
 11. Rebalance if inventory becomes one-sided.
 ```
 
+At the start of each live tick:
+
+```text
+- reconcile open wallet orders from Alpha / on-chain data
+- keep existing live orders when the intended quote is effectively unchanged
+- only cancel or replace when current market state requires a different quote
+- spread live slots across markets using ALPHA_MAX_LIVE_ORDERS_PER_MARKET
+- skip live submissions when ALGO is below ALPHA_MIN_ALGO_BALANCE
+```
+
 Cancel/amend when:
 
 ```text
-- order older than ALPHA_STALE_ORDER_SECONDS
-- reward eligibility lost
-- midpoint moved materially
+- no reward-qualified or maker-qualified quote exists for that market/outcome/side
+- intended quote price moved by more than ALPHA_QUOTE_REFRESH_THRESHOLD_CENTS
+- reward eligibility is lost
 - outcome spread collapsed below threshold
 - market moved near close
 - exposure cap would be exceeded
@@ -1469,9 +1521,10 @@ Do not enable real trading until paper mode shows:
 Initial future live settings should be tiny:
 
 ```text
-ALPHA_MAX_ORDER_SIZE_USD=1
-ALPHA_MAX_MARKET_EXPOSURE_USD=3
-ALPHA_MAX_TOTAL_EXPOSURE_USD=10
+ALPHA_TARGET_QUOTE_SIZE_USD=3
+ALPHA_MAX_ORDER_SIZE_USD=3
+ALPHA_MAX_MARKET_EXPOSURE_USD=6
+ALPHA_MAX_TOTAL_EXPOSURE_USD=12
 ```
 
 ---

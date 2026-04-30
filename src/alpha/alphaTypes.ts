@@ -79,6 +79,7 @@ export type AlphaQuote = {
   reason: string;
   rewardEligible: boolean;
   rewardZoneDistanceCents?: number;
+  rewardMinContracts?: number;
   estimatedRewardUsdPerDay?: number;
   source: "reward" | "spread" | "inventory_exit";
 };
@@ -93,10 +94,12 @@ export type AlphaPaperOrder = AlphaQuote & {
   remainingShares: number;
   liveEscrowAppId?: number;
   liveTxIds?: string[];
+  owner?: string;
 };
 
 export type AlphaPaperPosition = {
   marketId: string;
+  marketAppId?: number;
   slug?: string;
   title: string;
   yesShares: number;

@@ -36,6 +36,7 @@ export function rankRewardCandidates(
     if (market.resolved || market.status !== "live") warnings.push("market is not live");
     if (dailyReward !== undefined && dailyReward < config.minDailyRewardUsd) warnings.push("daily reward below configured minimum");
     if (maxSpread === undefined) warnings.push("reward spread metadata unavailable");
+    if (market.reward.minContracts === undefined) warnings.push("minimum aggregate reward size unavailable");
     if (maxSpread !== undefined && maxSpread < config.minRewardZoneCents) warnings.push("reward zone is very tight");
     if (!competitionAllowed(market.reward.competitionLevel, config.maxRewardCompetition)) warnings.push("competition above configured maximum");
     if (midpoint === undefined) warnings.push("midpoint unavailable");
@@ -56,7 +57,9 @@ export function rankRewardCandidates(
       title: market.title,
       confidence: warnings.length === 0 ? "high" : "medium",
       classification: warnings.length === 0 ? "CANDIDATE" : "OBSERVATION",
-      reason: `rewardScore=${score.toFixed(1)}, dailyReward=${dailyReward?.toFixed(2) ?? "unknown"}`,
+      reason: `rewardScore=${score.toFixed(1)}, dailyReward=${dailyReward?.toFixed(2) ?? "unknown"}, aggregateMinContracts=${
+        market.reward.minContracts?.toFixed(6) ?? "unknown"
+      }`,
       requiredAction: "place reward-qualified resting limit orders near midpoint",
       warnings,
       reward: {

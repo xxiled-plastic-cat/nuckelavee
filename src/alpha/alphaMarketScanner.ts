@@ -18,11 +18,20 @@ export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig)
   } catch (error) {
     rewardError = error instanceof Error ? error.message : String(error);
   }
-  const byAppId = new Map<number, AlphaMarket>();
-  for (const market of [...rewardMarkets, ...markets]) {
-    byAppId.set(market.marketAppId, market);
+  const rewardByAppId = new Map<number, AlphaMarket>();
+  for (const market of rewardMarkets) rewardByAppId.set(market.marketAppId, market);
+  const spreadByAppId = new Map<number, AlphaMarket>();
+  for (const market of markets) {
+    if (!rewardByAppId.has(market.marketAppId)) spreadByAppId.set(market.marketAppId, market);
   }
-  const marketsToScan = [...byAppId.values()].slice(0, config.scanOrderbookLimit);
+  const marketsToScanByAppId = new Map<number, AlphaMarket>();
+  for (const market of [...rewardByAppId.values()].slice(0, config.scanOrderbookLimit)) {
+    marketsToScanByAppId.set(market.marketAppId, market);
+  }
+  for (const market of [...spreadByAppId.values()].slice(0, config.spreadScanOrderbookLimit)) {
+    marketsToScanByAppId.set(market.marketAppId, market);
+  }
+  const marketsToScan = [...marketsToScanByAppId.values()];
   const books = await Promise.all(
     marketsToScan.map(async (market) => [market.marketAppId, await client.getOrderbook(market)] as const),
   );
