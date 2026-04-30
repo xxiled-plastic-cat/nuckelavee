@@ -85,16 +85,13 @@ async function main(): Promise<void> {
     running = true;
     lastTickStartedAt = new Date().toISOString();
     console.log(`[${lastTickStartedAt}] cron tick start`);
-    await notifyTelegram(`Nuckelavee cron tick start\nat=${lastTickStartedAt}`);
     const exitCode = await runTick();
     lastTickEndedAt = new Date().toISOString();
     lastTickExitCode = exitCode;
     console.log(`[${lastTickEndedAt}] cron tick end exit_code=${exitCode}`);
-    await notifyTelegram(
-      exitCode === 0
-        ? `Nuckelavee cron tick end\nat=${lastTickEndedAt}\nexit_code=${exitCode}`
-        : `ALERT: Nuckelavee cron tick failed\nat=${lastTickEndedAt}\nexit_code=${exitCode}`,
-    );
+    if (exitCode !== 0) {
+      await notifyTelegram(`ALERT: Nuckelavee cron tick failed\nat=${lastTickEndedAt}\nexit_code=${exitCode}`);
+    }
     running = false;
   });
 }

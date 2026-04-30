@@ -83,35 +83,81 @@ function isLowBalanceWarning(message: string): boolean {
   );
 }
 
-function buildLiveActionNotifications(actions: LiveAction[], mode: "live-dry-run" | "live"): string[] {
-  if (mode !== "live") return [];
-  const messages: string[] = [];
+function summarizeTickActions(actions: LiveAction[]): {
+  placed: string[];
+  cancelled: string[];
+  inferredEntryFills: string[];
+  inferredExitFills: string[];
+  parityEvents: string[];
+  warnings: string[];
+} {
+  const summary = {
+    placed: [] as string[],
+    cancelled: [] as string[],
+    inferredEntryFills: [] as string[],
+    inferredExitFills: [] as string[],
+    parityEvents: [] as string[],
+    warnings: [] as string[],
+  };
+
   for (const action of actions) {
     if (action.kind === "place") {
-      messages.push(`Live order placed\n${action.message}`);
+      summary.placed.push(action.message);
       continue;
     }
     if (action.kind === "cancel") {
-      messages.push(`Live order cancelled\n${action.message}`);
+      summary.cancelled.push(action.message);
       continue;
     }
-    if (action.message.startsWith("Inferred live entry fill") || action.message.startsWith("Inferred live exit fill")) {
-      messages.push(`Inferred fill\n${action.message}`);
+    if (action.message.startsWith("Inferred live entry fill")) {
+      summary.inferredEntryFills.push(action.message);
       continue;
     }
-    if (action.kind === "parity" && action.message.startsWith("Executed")) {
-      messages.push(`Parity trade executed\n${action.message}`);
+    if (action.message.startsWith("Inferred live exit fill")) {
+      summary.inferredExitFills.push(action.message);
       continue;
     }
-    if (action.message.startsWith("Parity failed")) {
-      messages.push(`ALERT: parity trade failed\n${action.message}`);
+    if (action.kind === "parity" || action.message.startsWith("Parity failed")) {
+      summary.parityEvents.push(action.message);
       continue;
     }
     if (isLowBalanceWarning(action.message)) {
-      messages.push(`ALERT: low wallet balance\n${action.message}`);
+      summary.warnings.push(action.message);
     }
   }
-  return messages;
+  return summary;
+}
+
+function compactLines(lines: string[], maxItems = 2): string {
+  if (lines.length === 0) return "none";
+  const shown = lines.slice(0, maxItems).join(" | ");
+  return lines.length > maxItems ? `${shown} | +${lines.length - maxItems} more` : shown;
+}
+
+function buildTickDigestMessage(result: {
+  actions: LiveAction[];
+  state: AlphaBotState;
+  walletUsdcBalanceUsd?: number;
+  walletAlgoBalance?: number;
+}): string {
+  const actionSummary = summarizeTickActions(result.actions);
+  const open = result.state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
+  const rewardEligible = open.filter((order) => order.rewardEligible).length;
+  const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
+  const tickAt = new Date().toISOString();
+
+  return [
+    `Tick digest ${tickAt}`,
+    `placed=${actionSummary.placed.length} cancelled=${actionSummary.cancelled.length} inferred_entry_fills=${actionSummary.inferredEntryFills.length} inferred_exit_fills=${actionSummary.inferredExitFills.length}`,
+    `wallet_usdc=${formatUsd(result.walletUsdcBalanceUsd)}`,
+    `wallet_algo=${result.walletAlgoBalance === undefined ? "unknown" : result.walletAlgoBalance.toFixed(6)}`,
+    `open_orders=${open.length} reward_eligible=${rewardEligible} exposure=${formatUsd(exposure)}`,
+    `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
+    `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)} est_rewards=${formatUsd(result.state.estimatedRewardsUsd)}`,
+    `placed_orders=${compactLines(actionSummary.placed)}`,
+    `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
+    `warnings=${compactLines(actionSummary.warnings, 1)}`,
+  ].join("\n");
 }
 
 function readDailySummaryHourUtc(): number | undefined {
@@ -160,9 +206,9 @@ function buildDailySummaryMessage(state: AlphaBotState, walletUsdcBalanceUsd?: n
 async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
   const { config, scan } = await buildScan(mode === "live");
   const result = await runLiveTick(scan, config, mode);
-  const notifications = buildLiveActionNotifications(result.actions, mode);
-  for (const message of notifications) {
-    await notifyTelegram(message);
+  if (mode === "live") {
+    const digest = buildTickDigestMessage(result);
+    await notifyTelegram(digest);
   }
   if (mode === "live" && shouldSendDailySummary(result.state)) {
     const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance);
