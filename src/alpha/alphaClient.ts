@@ -97,22 +97,25 @@ function toMarketStatus(market: Market): string {
 
 function flattenMarket(market: Market): AlphaMarket[] {
   if (market.options && market.options.length > 0) {
-    return market.options.map((option) => ({
-      id: option.id ?? `${market.id}:${option.marketAppId}`,
-      marketAppId: option.marketAppId,
-      slug: market.slug,
-      title: `${market.title} - ${option.title ?? (option as MarketOption & Record<string, unknown>).label ?? option.id}`,
-      category: market.categories?.[0],
-      status: toMarketStatus(market),
-      closeTime: market.endTs ? new Date(market.endTs * 1000).toISOString() : undefined,
-      endTs: market.endTs,
-      resolved: Boolean(market.isResolved),
-      yesPrice: normalizeApiPrice(option.yesProb),
-      noPrice: normalizeApiPrice(option.noProb),
-      volume: normalizeMarketVolumeUsd(market.volume),
-      reward: toRewardInfo(option),
-      raw: { market, option },
-    }));
+    return market.options.map((option) => {
+      const looseOption = option as MarketOption & Record<string, unknown>;
+      return {
+        id: option.id ?? `${market.id}:${option.marketAppId}`,
+        marketAppId: option.marketAppId,
+        slug: market.slug,
+        title: `${market.title} - ${option.title ?? looseOption.label ?? option.id}`,
+        category: market.categories?.[0],
+        status: toMarketStatus(market),
+        closeTime: market.endTs ? new Date(market.endTs * 1000).toISOString() : undefined,
+        endTs: market.endTs,
+        resolved: Boolean(market.isResolved),
+        yesPrice: normalizeApiPrice(option.yesProb),
+        noPrice: normalizeApiPrice(option.noProb),
+        volume: normalizeMarketVolumeUsd(looseOption.volume ?? market.volume),
+        reward: toRewardInfo(option),
+        raw: { market, option },
+      };
+    });
   }
   return [
     {
