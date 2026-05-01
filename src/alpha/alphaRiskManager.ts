@@ -7,6 +7,8 @@ export type AlphaRiskDecision = {
   riskLevel: "low" | "medium" | "high";
 };
 
+type QuoteLane = "reward" | "spread";
+
 function orderExposure(order: { side: string; price: number; remainingShares: number }): number {
   return order.side === "bid" ? order.price * order.remainingShares : 0;
 }
@@ -52,20 +54,71 @@ function openAskShares(state: AlphaBotState, marketId: string, outcome: "YES" | 
     .reduce((sum, order) => sum + order.remainingShares, 0);
 }
 
+function laneFromSource(source: AlphaQuote["source"]): QuoteLane {
+  return source === "reward" ? "reward" : "spread";
+}
+
+function laneFromQuote(quote: AlphaQuote): QuoteLane {
+  return laneFromSource(quote.source);
+}
+
+function laneFromOrder(order: { source: AlphaQuote["source"] }): QuoteLane {
+  return laneFromSource(order.source);
+}
+
+function laneOpenOrderCount(state: AlphaBotState, lane: QuoteLane, mode: AlphaMode): number {
+  return state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode) && laneFromOrder(order) === lane).length;
+}
+
+function laneOpenOrderCountByMarket(state: AlphaBotState, lane: QuoteLane, marketId: string, mode: AlphaMode): number {
+  return state.openOrders.filter(
+    (order) => order.status === "open" && matchesMode(order, mode) && order.marketId === marketId && laneFromOrder(order) === lane,
+  ).length;
+}
+
+function laneOrderExposure(state: AlphaBotState, lane: QuoteLane, mode: AlphaMode): number {
+  return state.openOrders
+    .filter((order) => order.status === "open" && matchesMode(order, mode) && laneFromOrder(order) === lane)
+    .reduce((sum, order) => sum + orderExposure(order), 0);
+}
+
+function laneOrderExposureByMarket(state: AlphaBotState, lane: QuoteLane, marketId: string, mode: AlphaMode): number {
+  return state.openOrders
+    .filter((order) => order.status === "open" && matchesMode(order, mode) && order.marketId === marketId && laneFromOrder(order) === lane)
+    .reduce((sum, order) => sum + orderExposure(order), 0);
+}
+
 export function checkQuoteRisk(
   quote: AlphaQuote,
   state: AlphaBotState,
   config: AlphaConfig,
   mode: AlphaMode,
 ): AlphaRiskDecision {
+  const lane = laneFromQuote(quote);
+  const laneMaxOrderSizeUsd = lane === "reward" ? config.rewardMaxOrderSizeUsd : config.spreadMaxOrderSizeUsd;
+  const laneMaxMarketExposureUsd = lane === "reward" ? config.rewardMaxMarketExposureUsd : config.spreadMaxMarketExposureUsd;
+  const laneMaxTotalExposureUsd = lane === "reward" ? config.rewardMaxTotalExposureUsd : config.spreadMaxTotalExposureUsd;
+  const laneMaxLiveOpenOrders = lane === "reward" ? config.rewardMaxLiveOpenOrders : config.spreadMaxLiveOpenOrders;
+  const laneMaxLiveOrdersPerMarket = lane === "reward" ? config.rewardMaxLiveOrdersPerMarket : config.spreadMaxLiveOrdersPerMarket;
+  const liveLikeMode = mode === "live" || mode === "live-dry-run";
+
+  if (quote.notionalUsd > laneMaxOrderSizeUsd) {
+    return { allowed: false, reason: `${lane} order size exceeds lane cap`, riskLevel: "high" };
+  }
   if (quote.notionalUsd > config.maxOrderSizeUsd) {
     return { allowed: false, reason: "order size exceeds max order size", riskLevel: "high" };
   }
   if (state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxOpenOrders) {
     return { allowed: false, reason: "open order count exceeds cap", riskLevel: "medium" };
   }
-  if (mode === "live" && state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxLiveOpenOrders) {
+  if (liveLikeMode && state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxLiveOpenOrders) {
     return { allowed: false, reason: "live open order count exceeds ALGO MBR-aware cap", riskLevel: "high" };
+  }
+  if (liveLikeMode && laneOpenOrderCount(state, lane, mode) >= laneMaxLiveOpenOrders) {
+    return { allowed: false, reason: `${lane} lane open order count exceeds cap`, riskLevel: "high" };
+  }
+  if (liveLikeMode && laneOpenOrderCountByMarket(state, lane, quote.marketId, mode) >= laneMaxLiveOrdersPerMarket) {
+    return { allowed: false, reason: `${lane} lane market open order count exceeds cap`, riskLevel: "medium" };
   }
   if (quote.price <= 0 || quote.price >= 1) {
     return { allowed: false, reason: "quote price outside valid range", riskLevel: "high" };
@@ -74,10 +127,16 @@ export function checkQuoteRisk(
     return { allowed: false, reason: "reward quote would sit outside reward zone", riskLevel: "medium" };
   }
   const addedExposure = quote.side === "bid" ? quote.notionalUsd : 0;
+  if (laneOrderExposureByMarket(state, lane, quote.marketId, mode) + addedExposure > laneMaxMarketExposureUsd) {
+    return { allowed: false, reason: `${lane} market exposure would exceed lane cap`, riskLevel: "high" };
+  }
+  if (laneOrderExposure(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
+    return { allowed: false, reason: `${lane} total exposure would exceed lane cap`, riskLevel: "high" };
+  }
   if (getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxMarketExposureUsd) {
     return { allowed: false, reason: "market exposure would exceed cap", riskLevel: "high" };
   }
-  if (quote.source === "spread" && getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxSpreadMarketExposureUsd) {
+  if (quote.source !== "reward" && getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxSpreadMarketExposureUsd) {
     return { allowed: false, reason: "spread market exposure would exceed cap", riskLevel: "medium" };
   }
   if (getTotalExposure(state, mode) + addedExposure > config.maxTotalExposureUsd) {

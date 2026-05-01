@@ -258,8 +258,9 @@ export class AlphaSdkClient {
       const amount = result.assetHolding?.amount ?? result.assetHoldingInfo?.amount ?? result.amount;
       if (amount === undefined) return 0;
       return Number(amount) / MICRO;
-    } catch {
-      return undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to fetch USDC balance for ${walletAddress}: ${message}`);
     }
   }
 
@@ -270,8 +271,9 @@ export class AlphaSdkClient {
       };
       if (result.amount === undefined) return 0;
       return Number(result.amount) / MICRO;
-    } catch {
-      return undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to fetch ALGO balance for ${walletAddress}: ${message}`);
     }
   }
 

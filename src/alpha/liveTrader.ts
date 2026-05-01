@@ -459,11 +459,27 @@ async function loadWalletOpenOrders(
 ): Promise<OpenOrder[]> {
   try {
     return await liveClient.getWalletOpenOrders(walletAddress);
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[alpha-live] wallet order sync via API failed; falling back to per-market reads: ${message}`);
     const results = await Promise.allSettled(
       [...marketByAppId.keys()].map((marketAppId) => liveClient.getOpenOrders(marketAppId, walletAddress)),
     );
-    return results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      for (const failure of failures) {
+        console.error(
+          `[alpha-live] per-market open order read failed: ${
+            failure.status === "rejected" ? (failure.reason instanceof Error ? failure.reason.message : String(failure.reason)) : "unknown"
+          }`,
+        );
+      }
+    }
+    const fulfilled = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+    if (fulfilled.length === 0 && failures.length > 0) {
+      throw new Error("Unable to read wallet open orders from API and all per-market fallbacks failed");
+    }
+    return fulfilled;
   }
 }
 
@@ -472,109 +488,72 @@ async function finalLiveTickResult(
   config: AlphaConfig,
   actions: LiveAction[],
   state: AlphaBotState,
+  options: {
+    walletUsdcBalanceUsd?: number;
+    walletAlgoBalance?: number;
+    refreshBalances?: boolean;
+  } = {},
 ): Promise<LiveTickResult> {
-  const [walletUsdcBalanceUsd, walletAlgoBalance] = await Promise.all([
-    config.walletAddress ? liveClient.getUsdcBalance(config.walletAddress) : Promise.resolve(undefined),
-    config.walletAddress ? liveClient.getAlgoBalance(config.walletAddress) : Promise.resolve(undefined),
-  ]);
-  actions.push({ kind: "skip", message: "Refreshed wallet USDC/ALGO balances for live summary" });
+  let walletUsdcBalanceUsd = options.walletUsdcBalanceUsd;
+  let walletAlgoBalance = options.walletAlgoBalance;
+  const refreshBalances = options.refreshBalances ?? true;
+  if (refreshBalances && config.walletAddress) {
+    try {
+      walletUsdcBalanceUsd = await liveClient.getUsdcBalance(config.walletAddress);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[alpha-live] ${message}`);
+      actions.push({ kind: "skip", message: `Wallet USDC refresh failed: ${message}` });
+    }
+    try {
+      walletAlgoBalance = await liveClient.getAlgoBalance(config.walletAddress);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[alpha-live] ${message}`);
+      actions.push({ kind: "skip", message: `Wallet ALGO refresh failed: ${message}` });
+    }
+    actions.push({ kind: "skip", message: "Refreshed wallet USDC/ALGO balances for live summary" });
+  }
   return { actions, state, walletUsdcBalanceUsd, walletAlgoBalance };
 }
 
-function rankDiversifiedQuotes(quotes: AlphaQuote[], state: AlphaBotState, config: AlphaConfig): AlphaQuote[] {
-  const openByMarket = new Map<number, number>();
-  const openOutcomesByMarket = new Map<number, Set<AlphaQuote["outcome"]>>();
-  const openRewardContractsByMarket = new Map<number, number>();
-  for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open")) {
-    openByMarket.set(order.marketAppId, (openByMarket.get(order.marketAppId) ?? 0) + 1);
-    if (!openOutcomesByMarket.has(order.marketAppId)) openOutcomesByMarket.set(order.marketAppId, new Set());
-    openOutcomesByMarket.get(order.marketAppId)?.add(order.outcome);
-    if (order.rewardEligible) {
-      openRewardContractsByMarket.set(order.marketAppId, (openRewardContractsByMarket.get(order.marketAppId) ?? 0) + order.remainingShares);
-    }
-  }
+type LaneQueues = {
+  reward: AlphaQuote[];
+  spread: AlphaQuote[];
+  exits: AlphaQuote[];
+};
 
-  const selected: AlphaQuote[] = [];
-  const selectedByMarket = new Map<number, number>();
-  const selectedOutcomesByMarket = new Map<number, Set<AlphaQuote["outcome"]>>();
-  const groupedQuotes = new Map<number, AlphaQuote[]>();
+function buildLaneQueues(quotes: AlphaQuote[], state: AlphaBotState, config: AlphaConfig): LaneQueues {
+  const deduped = new Map<string, AlphaQuote>();
   for (const quote of quotes) {
     const alreadyOpen = state.openOrders.some(
       (order) => order.runMode === "live" && order.status === "open" && isEquivalentQuote(order, quote, config),
     );
     if (alreadyOpen) continue;
-    if (!groupedQuotes.has(quote.marketAppId)) groupedQuotes.set(quote.marketAppId, []);
-    groupedQuotes.get(quote.marketAppId)?.push(quote);
-  }
-
-  const selectQuote = (quote: AlphaQuote): void => {
-    selected.push(quote);
-    selectedByMarket.set(quote.marketAppId, (selectedByMarket.get(quote.marketAppId) ?? 0) + 1);
-    if (!selectedOutcomesByMarket.has(quote.marketAppId)) selectedOutcomesByMarket.set(quote.marketAppId, new Set());
-    selectedOutcomesByMarket.get(quote.marketAppId)?.add(quote.outcome);
-  };
-
-  const quoteScore = (quote: AlphaQuote): number => {
-    if (quote.source === "inventory_exit") return 0;
-    if (quote.rewardEligible) return 1;
-    if (quote.source === "spread") return 2;
-    return 3;
-  };
-
-  const compareQuotes = (a: AlphaQuote, b: AlphaQuote): number => {
-    const scoreDiff = quoteScore(a) - quoteScore(b);
-    if (scoreDiff !== 0) return scoreDiff;
-    if (a.source === "spread" && b.source === "spread") return spreadQuoteQuality(b, state) - spreadQuoteQuality(a, state);
-    return b.notionalUsd - a.notionalUsd;
-  };
-
-  for (const marketQuotes of groupedQuotes.values()) {
-    marketQuotes.sort(compareQuotes);
-    const openCount = openByMarket.get(marketQuotes[0]?.marketAppId ?? 0) ?? 0;
-    const room = Math.max(0, config.maxLiveOrdersPerMarket - openCount);
-    if (room <= 0) continue;
-
-    const minContracts = Math.max(...marketQuotes.map((quote) => quote.rewardMinContracts ?? 0));
-    const openRewardContracts = openRewardContractsByMarket.get(marketQuotes[0]?.marketAppId ?? 0) ?? 0;
-    const availableRewardContracts = marketQuotes
-      .filter((quote) => quote.rewardEligible)
-      .slice(0, room)
-      .reduce((sum, quote) => sum + quote.sizeShares, openRewardContracts);
-    const rewardMinimumReachable = minContracts === 0 || availableRewardContracts >= minContracts;
-
-    const openOutcomes = openOutcomesByMarket.get(marketQuotes[0]?.marketAppId ?? 0) ?? new Set<AlphaQuote["outcome"]>();
-    const pairableRewardBids = rewardMinimumReachable
-      ? marketQuotes.filter((quote) => quote.rewardEligible && quote.side === "bid" && !openOutcomes.has(quote.outcome))
-      : [];
-    const yes = pairableRewardBids.find((quote) => quote.outcome === "YES");
-    const no = pairableRewardBids.find((quote) => quote.outcome === "NO");
-    if (room >= 2 && yes && no) {
-      selectQuote(yes);
-      selectQuote(no);
+    if (quote.source !== "inventory_exit" && quote.side !== "bid") continue;
+    const key = `${quote.marketAppId}:${quote.outcome}:${quote.side}:${quote.source}`;
+    const previous = deduped.get(key);
+    if (!previous) {
+      deduped.set(key, quote);
       continue;
     }
-
-    const exitQuote = marketQuotes.find((quote) => quote.source === "inventory_exit");
-    const spreadQuote = marketQuotes.find((quote) => quote.source === "spread" && quote.side === "bid" && !openOutcomes.has(quote.outcome));
-    const preferred = exitQuote ?? pairableRewardBids[0] ?? spreadQuote ?? marketQuotes.find((quote) => !openOutcomes.has(quote.outcome)) ?? marketQuotes[0];
-    if (preferred) selectQuote(preferred);
-  }
-
-  for (const marketQuotes of groupedQuotes.values()) {
-    marketQuotes.sort(compareQuotes);
-    for (const quote of marketQuotes) {
-      if (selected.includes(quote)) continue;
-      const marketCount = (openByMarket.get(quote.marketAppId) ?? 0) + (selectedByMarket.get(quote.marketAppId) ?? 0);
-      if (marketCount >= config.maxLiveOrdersPerMarket) continue;
-      const usedOutcomes = new Set([
-        ...(openOutcomesByMarket.get(quote.marketAppId) ?? new Set<AlphaQuote["outcome"]>()),
-        ...(selectedOutcomesByMarket.get(quote.marketAppId) ?? new Set<AlphaQuote["outcome"]>()),
-      ]);
-      if (usedOutcomes.has(quote.outcome)) continue;
-      selectQuote(quote);
+    if (quote.source === "spread") {
+      if (spreadQuoteQuality(quote, state) > spreadQuoteQuality(previous, state)) deduped.set(key, quote);
+      continue;
     }
+    if (quote.notionalUsd > previous.notionalUsd) deduped.set(key, quote);
   }
-  return selected;
+
+  const all = [...deduped.values()];
+  const exits = all.filter((quote) => quote.source === "inventory_exit").sort((a, b) => b.notionalUsd - a.notionalUsd);
+  const reward = all
+    .filter((quote) => quote.source === "reward")
+    .sort((a, b) => (a.marketAppId === b.marketAppId ? b.notionalUsd - a.notionalUsd : a.marketAppId - b.marketAppId));
+  const spread = all
+    .filter((quote) => quote.source === "spread")
+    .sort((a, b) => spreadQuoteQuality(b, state) - spreadQuoteQuality(a, state));
+
+  return { reward, spread, exits };
 }
 
 export async function runLiveTick(
@@ -586,17 +565,46 @@ export async function runLiveTick(
   if (!config.walletAddress) throw new Error(`${mode} requires ALPHA_WALLET_ADDRESS or mnemonic-derived address`);
 
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
-  const liveClient = new AlphaSdkClient(config, mode === "live");
-  const walletUsdcBalanceUsd = await liveClient.getUsdcBalance(config.walletAddress);
-  const walletAlgoBalance = await liveClient.getAlgoBalance(config.walletAddress);
   const actions: LiveAction[] = [];
+  const liveClient = new AlphaSdkClient(config, mode === "live");
+  let walletUsdcBalanceUsd: number | undefined;
+  let walletAlgoBalance: number | undefined;
+  try {
+    walletUsdcBalanceUsd = await liveClient.getUsdcBalance(config.walletAddress);
+    walletAlgoBalance = await liveClient.getAlgoBalance(config.walletAddress);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[alpha-live] tick aborted during wallet balance fetch: ${message}`);
+    actions.push({ kind: "skip", message: `Tick aborted safely: ${message}` });
+    state.strategyStats.lastRunMode = mode;
+    if (mode === "live") await saveAlphaState(config.stateKey, state);
+    return finalLiveTickResult(liveClient, config, actions, state, {
+      walletUsdcBalanceUsd,
+      walletAlgoBalance,
+      refreshBalances: false,
+    });
+  }
   const marketByAppId = new Map<number, AlphaMarket>();
   for (const market of [...scan.markets, ...scan.rewardMarkets]) {
     marketByAppId.set(market.marketAppId, market);
   }
 
   const beforePositions = snapshotPositions(state);
-  const walletOrders = await loadWalletOpenOrders(liveClient, config.walletAddress, marketByAppId);
+  let walletOrders: OpenOrder[] = [];
+  try {
+    walletOrders = await loadWalletOpenOrders(liveClient, config.walletAddress, marketByAppId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[alpha-live] tick aborted during wallet open order sync: ${message}`);
+    actions.push({ kind: "skip", message: `Tick aborted safely: ${message}` });
+    state.strategyStats.lastRunMode = mode;
+    if (mode === "live") await saveAlphaState(config.stateKey, state);
+    return finalLiveTickResult(liveClient, config, actions, state, {
+      walletUsdcBalanceUsd,
+      walletAlgoBalance,
+      refreshBalances: false,
+    });
+  }
   const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
   let walletPositions: PositionSnapshot = {};
@@ -608,7 +616,9 @@ export async function runLiveTick(
     const syncedPositions = mergeLivePositionsFromWallet(state, positions, marketByAppId);
     actions.push({ kind: "skip", message: `Synced ${syncedPositions} live position(s) from wallet` });
   } catch (error) {
-    actions.push({ kind: "skip", message: `Position sync skipped: ${error instanceof Error ? error.message : String(error)}` });
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[alpha-live] position sync failed: ${message}`);
+    actions.push({ kind: "skip", message: `Position sync skipped: ${message}` });
   }
   if (positionsSynced) {
     inferClosedLiveOrders(state, closedOrders, beforePositions, walletPositions, actions);
@@ -617,6 +627,16 @@ export async function runLiveTick(
   }
   const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
   actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
+  const allExecutionLanesDisabled = !config.enableRewardLane && !config.enableSpreadLane && !config.enableParityLane;
+  if (allExecutionLanesDisabled) {
+    actions.push({
+      kind: "skip",
+      message: "All execution lanes disabled (reward/spread/parity); reporting summary only",
+    });
+    state.strategyStats.lastRunMode = mode;
+    if (mode === "live") await saveAlphaState(config.stateKey, state);
+    return finalLiveTickResult(liveClient, config, actions, state);
+  }
 
   const quotes: AlphaQuote[] = [];
   let blockedSpreadEntries = 0;
@@ -707,7 +727,9 @@ export async function runLiveTick(
         await saveAlphaState(config.stateKey, state);
       }
     } catch (error) {
-      actions.push({ kind: "skip", message: `Cancel failed escrowAppId=${escrowAppId}: ${error instanceof Error ? error.message : String(error)}` });
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[alpha-live] cancel failed escrowAppId=${escrowAppId}: ${message}`);
+      actions.push({ kind: "skip", message: `Cancel failed escrowAppId=${escrowAppId}: ${message}` });
     }
   }
   state.openOrders = state.openOrders.filter((order) => order.status === "open");
@@ -725,6 +747,11 @@ export async function runLiveTick(
 
   const openLiveOrders = state.openOrders.filter((order) => order.runMode === "live" && order.status === "open" && order.liveEscrowAppId !== undefined);
   const slots = Math.max(0, config.maxLiveOpenOrders - openLiveOrders.length);
+  const parityReservedSlots = Math.min(config.paritySlotReserve, slots);
+  const parityAvailableSlots = parityReservedSlots > 0 ? parityReservedSlots : slots;
+  if (parityReservedSlots > 0) {
+    actions.push({ kind: "skip", message: `Reserved ${parityReservedSlots} slot(s) for parity lane` });
+  }
   actions.push(
     ...(await runParityLane({
       scan,
@@ -734,25 +761,68 @@ export async function runLiveTick(
       mode,
       walletUsdcBalanceUsd,
       walletAlgoBalance,
-      availableSlots: slots,
+      availableSlots: parityAvailableSlots,
     })),
   );
-  if (slots === 0) {
+  const quoteSlots = Math.max(0, slots - parityReservedSlots);
+  if (quoteSlots === 0) {
     actions.push({ kind: "skip", message: "No live order slots available under ALGO MBR-aware cap" });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
     return finalLiveTickResult(liveClient, config, actions, state);
   }
 
-  const rankedQuotes = rankDiversifiedQuotes(quotes, state, config);
+  const laneQueues = buildLaneQueues(quotes, state, config);
   const pendingExitSlots = Math.min(
     config.spreadExitSlotReserve,
-    rankedQuotes.filter((quote) => quote.source === "inventory_exit").length,
+    laneQueues.exits.length,
+    quoteSlots,
   );
-  const bidSlotLimit = Math.max(0, slots - pendingExitSlots);
   if (pendingExitSlots > 0) {
     actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} live order slot(s) for inventory exits` });
   }
-  const rewardWindow = rankedQuotes.slice(0, slots);
+  const openRewardOrders = state.openOrders.filter(
+    (order) => order.runMode === "live" && order.status === "open" && order.source === "reward",
+  ).length;
+  const openSpreadOrders = state.openOrders.filter(
+    (order) => order.runMode === "live" && order.status === "open" && order.source !== "reward",
+  ).length;
+  const rewardQueueCap = Math.max(0, config.rewardMaxLiveOpenOrders - openRewardOrders);
+  const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadOrders);
+  const placementQueue: AlphaQuote[] = [];
+  const added = new Set<string>();
+  let rewardQueued = 0;
+  let spreadQueued = 0;
+
+  const pushQuote = (quote: AlphaQuote): boolean => {
+    const key = `${quote.marketAppId}:${quote.outcome}:${quote.side}:${quote.source}:${quote.price.toFixed(6)}`;
+    if (added.has(key)) return false;
+    if (placementQueue.length >= quoteSlots) return false;
+    if (quote.source === "reward" && rewardQueued >= rewardQueueCap) return false;
+    if (quote.source !== "reward" && quote.source !== "inventory_exit" && spreadQueued >= spreadQueueCap) return false;
+    placementQueue.push(quote);
+    added.add(key);
+    if (quote.source === "reward") rewardQueued += 1;
+    if (quote.source === "spread") spreadQueued += 1;
+    return true;
+  };
+
+  for (const exit of laneQueues.exits.slice(0, pendingExitSlots)) {
+    if (!pushQuote(exit)) break;
+  }
+  for (const reward of laneQueues.reward) {
+    if (placementQueue.length >= quoteSlots) break;
+    pushQuote(reward);
+  }
+  for (const spread of laneQueues.spread) {
+    if (placementQueue.length >= quoteSlots) break;
+    pushQuote(spread);
+  }
+  for (const exit of laneQueues.exits.slice(pendingExitSlots)) {
+    if (placementQueue.length >= quoteSlots) break;
+    pushQuote(exit);
+  }
+
+  const rewardWindow = placementQueue;
   const selectedRewardContractsByMarket = new Map<number, number>();
   for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open" && candidate.rewardEligible)) {
     selectedRewardContractsByMarket.set(order.marketAppId, (selectedRewardContractsByMarket.get(order.marketAppId) ?? 0) + order.remainingShares);
@@ -762,13 +832,8 @@ export async function runLiveTick(
   }
 
   let slotsUsed = 0;
-  let bidSlotsUsed = 0;
-  for (const quote of rankedQuotes) {
-    if (slotsUsed >= slots) break;
-    if (quote.side === "bid" && bidSlotsUsed >= bidSlotLimit) {
-      actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} bid skipped; remaining slot(s) reserved for inventory exits` });
-      continue;
-    }
+  for (const quote of placementQueue) {
+    if (slotsUsed >= quoteSlots) break;
     const aggregateRewardContracts = selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0;
     if (quote.source === "reward" && quote.rewardMinContracts !== undefined && aggregateRewardContracts < quote.rewardMinContracts) {
       actions.push({
@@ -790,7 +855,6 @@ export async function runLiveTick(
         )} / ${quote.sizeShares.toFixed(6)} shares; ${quote.reason}`,
       });
       slotsUsed += 1;
-      if (quote.side === "bid") bidSlotsUsed += 1;
       continue;
     }
     if (quote.side === "ask" && quote.source !== "inventory_exit") {
@@ -808,11 +872,12 @@ export async function runLiveTick(
       state.openOrders.push(toTrackedLiveOrder(quote, result));
       state.strategyStats.liveOrdersPlaced += 1;
       slotsUsed += 1;
-      if (quote.side === "bid") bidSlotsUsed += 1;
       actions.push({ kind: "place", message: `Placed ${quote.title} ${quote.outcome} ${quote.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);
     } catch (error) {
-      actions.push({ kind: "skip", message: `Place failed ${quote.title} ${quote.outcome}: ${error instanceof Error ? error.message : String(error)}` });
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[alpha-live] place failed ${quote.title} ${quote.outcome}: ${message}`);
+      actions.push({ kind: "skip", message: `Place failed ${quote.title} ${quote.outcome}: ${message}` });
     }
   }
   state.strategyStats.lastRunMode = mode;

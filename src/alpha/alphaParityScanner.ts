@@ -22,14 +22,16 @@ function findBestSize(
   yesLevels: AlphaBookLevel[],
   noLevels: AlphaBookLevel[],
   maxShares: number,
-  minShares: number,
+  minNotionalUsd: number,
+  maxNotionalUsd: number,
   minNetEdgeBps: number,
   slippageCents: number,
   edgeForPrices: (yesPrice: number, noPrice: number) => number,
+  notionalForPrices: (sizeShares: number, yesPrice: number, noPrice: number) => number,
 ): { sizeShares: number; yesPrice: number; noPrice: number; grossEdgeBps: number; estimatedNetEdgeBps: number } | undefined {
-  if (maxShares < minShares) return undefined;
+  if (maxShares <= 0 || maxNotionalUsd <= 0 || maxNotionalUsd < minNotionalUsd) return undefined;
   const slippageBufferBps = (slippageCents / 100) * 2 * 10_000;
-  let low = minShares;
+  let low = 0.000001;
   let high = maxShares;
   let best: { sizeShares: number; yesPrice: number; noPrice: number; grossEdgeBps: number; estimatedNetEdgeBps: number } | undefined;
 
@@ -41,13 +43,19 @@ function findBestSize(
       high = sizeShares;
       continue;
     }
+    const notionalUsd = notionalForPrices(sizeShares, yesPrice, noPrice);
+    if (notionalUsd > maxNotionalUsd) {
+      high = sizeShares;
+      continue;
+    }
     const grossEdgeBps = edgeForPrices(yesPrice, noPrice);
     const estimatedNetEdgeBps = grossEdgeBps - slippageBufferBps;
-    if (estimatedNetEdgeBps >= minNetEdgeBps) {
+    if (notionalUsd >= minNotionalUsd && estimatedNetEdgeBps >= minNetEdgeBps) {
       best = { sizeShares, yesPrice, noPrice, grossEdgeBps, estimatedNetEdgeBps };
       low = sizeShares;
     } else {
-      high = sizeShares;
+      if (notionalUsd < minNotionalUsd) low = sizeShares;
+      else high = sizeShares;
     }
   }
   return best;
@@ -56,19 +64,21 @@ function findBestSize(
 function planParityBuy(market: AlphaMarket, book: AlphaOrderbook, config: AlphaConfig): AlphaParityPlan | undefined {
   const yesAsks = [...book.yesSideOrders.asks].sort((a, b) => a.price - b.price);
   const noAsks = [...book.noSideOrders.asks].sort((a, b) => a.price - b.price);
-  const maxShares = Math.min(totalShares(yesAsks), totalShares(noAsks), config.parityMaxTradeUsd);
-  const minShares = config.parityMinDepthUsd;
+  const maxShares = Math.min(totalShares(yesAsks), totalShares(noAsks));
   const best = findBestSize(
     yesAsks,
     noAsks,
     maxShares,
-    minShares,
+    config.parityMinTradeUsd,
+    config.parityMaxTradeUsd,
     config.parityMinEdgeBps,
     config.paritySlippageCents,
     (yesPrice, noPrice) => (1 - yesPrice - noPrice) * 10_000,
+    (sizeShares, yesPrice, noPrice) => sizeShares * (yesPrice + noPrice),
   );
   if (!best) return undefined;
   const notionalUsd = best.sizeShares * (best.yesPrice + best.noPrice);
+  if (notionalUsd < config.parityMinDepthUsd) return undefined;
   return {
     type: "PARITY",
     marketId: market.id,
@@ -90,18 +100,20 @@ function planParityBuy(market: AlphaMarket, book: AlphaOrderbook, config: AlphaC
 function planSplitSell(market: AlphaMarket, book: AlphaOrderbook, config: AlphaConfig): AlphaParityPlan | undefined {
   const yesBids = [...book.yesSideOrders.bids].sort((a, b) => b.price - a.price);
   const noBids = [...book.noSideOrders.bids].sort((a, b) => b.price - a.price);
-  const maxShares = Math.min(totalShares(yesBids), totalShares(noBids), config.parityMaxTradeUsd);
-  const minShares = config.parityMinDepthUsd;
+  const maxShares = Math.min(totalShares(yesBids), totalShares(noBids));
   const best = findBestSize(
     yesBids,
     noBids,
     maxShares,
-    minShares,
+    config.parityMinTradeUsd,
+    config.parityMaxTradeUsd,
     config.parityMinEdgeBps,
     config.paritySlippageCents,
     (yesPrice, noPrice) => (yesPrice + noPrice - 1) * 10_000,
+    (sizeShares, _yesPrice, _noPrice) => sizeShares,
   );
   if (!best) return undefined;
+  if (best.sizeShares < config.parityMinDepthUsd) return undefined;
   const proceedsUsd = best.sizeShares * (best.yesPrice + best.noPrice);
   return {
     type: "SPLIT_MERGE",

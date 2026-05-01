@@ -11,7 +11,7 @@ import type { AlphaBotState } from "./alphaTypes.js";
 import { runPaperTick, loadPaperReport } from "./paperTrader.js";
 import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
-import { notifyTelegram } from "./telegramNotifier.js";
+import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
 import { closeDatabase } from "../db.js";
 
 dotenv.config();
@@ -160,6 +160,12 @@ function buildTickDigestMessage(result: {
   ].join("\n");
 }
 
+function extractTickAbortMessages(actions: LiveAction[]): string[] {
+  return actions
+    .filter((action) => action.message.startsWith("Tick aborted safely:"))
+    .map((action) => action.message.replace("Tick aborted safely:", "").trim());
+}
+
 function readDailySummaryHourUtc(): number | undefined {
   const raw = process.env.ALPHA_TELEGRAM_DAILY_SUMMARY_HOUR?.trim();
   if (!raw) return undefined;
@@ -206,6 +212,18 @@ function buildDailySummaryMessage(state: AlphaBotState, walletUsdcBalanceUsd?: n
 async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
   const { config, scan } = await buildScan(mode === "live");
   const result = await runLiveTick(scan, config, mode);
+  const abortMessages = extractTickAbortMessages(result.actions);
+  if (mode === "live" && abortMessages.length > 0) {
+    const throttleMinutes = readSkipNoticeThrottleMinutes();
+    const summary = abortMessages.slice(0, 2).join(" | ");
+    await notifyTelegramThrottled(
+      "alpha-live-tick-aborted",
+      `ALERT: Nuckelavee live tick aborted safely\nreasons=${summary}\nwallet_usdc=${formatUsd(result.walletUsdcBalanceUsd)}\nwallet_algo=${
+        result.walletAlgoBalance === undefined ? "unknown" : result.walletAlgoBalance.toFixed(6)
+      }`,
+      { throttleMinutes },
+    );
+  }
   if (mode === "live") {
     const digest = buildTickDigestMessage(result);
     await notifyTelegram(digest);

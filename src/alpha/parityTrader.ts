@@ -70,8 +70,11 @@ function validatePlan(
     return `wallet ALGO ${walletAlgoBalance.toFixed(6)} below safety floor ${config.minAlgoBalance.toFixed(2)}`;
   }
   if (availableSlots <= 0) return "no MBR-aware live order slots available for parity market orders";
-  if (plan.sizeShares > config.parityMaxTradeUsd) {
-    return `size ${plan.sizeShares.toFixed(2)} exceeds parity trade cap ${config.parityMaxTradeUsd.toFixed(2)}`;
+  if (plan.notionalUsd < config.parityMinTradeUsd) {
+    return `trade notional $${plan.notionalUsd.toFixed(2)} below parity minimum $${config.parityMinTradeUsd.toFixed(2)}`;
+  }
+  if (plan.notionalUsd > config.parityMaxTradeUsd) {
+    return `trade notional $${plan.notionalUsd.toFixed(2)} exceeds parity maximum $${config.parityMaxTradeUsd.toFixed(2)}`;
   }
   if (plan.notionalUsd < config.parityMinDepthUsd) {
     return `depth $${plan.notionalUsd.toFixed(2)} below parity minimum $${config.parityMinDepthUsd.toFixed(2)}`;
@@ -165,6 +168,9 @@ export async function runParityLane(input: {
   availableSlots: number;
 }): Promise<ParityAction[]> {
   const { scan, state, config, liveClient, mode, walletUsdcBalanceUsd, walletAlgoBalance, availableSlots } = input;
+  if (!config.enableParityLane) {
+    return [{ kind: "skip", message: "Parity lane disabled (ALPHA_ENABLE_PARITY_LANE=false)" }];
+  }
   const marketByAppId = new Map([...scan.markets, ...scan.rewardMarkets].map((market) => [market.marketAppId, market]));
   const plans = scanParity([...marketByAppId.values()], scan.orderbooks, config);
   const actions: ParityAction[] = [];
@@ -174,7 +180,8 @@ export async function runParityLane(input: {
   }
 
   actions.push({ kind: "parity", message: `Parity: ${plans.length} executable candidate(s) detected` });
-  for (const plan of plans.slice(0, 3)) {
+  const planWindow = plans.slice(0, Math.max(1, config.parityQueueLimit));
+  for (const plan of planWindow) {
     const rejection = validatePlan(plan, state, config, walletUsdcBalanceUsd, walletAlgoBalance, availableSlots);
     if (rejection) {
       recordSkipped(state, plan, mode, rejection);

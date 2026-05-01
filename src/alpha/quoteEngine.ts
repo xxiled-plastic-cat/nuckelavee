@@ -15,6 +15,22 @@ function quoteSize(price: number, notionalUsd: number): { sizeShares: number; no
   return { sizeShares, notionalUsd: price * sizeShares };
 }
 
+function laneNotionalUsd(
+  targetUsd: number,
+  minUsd: number,
+  maxUsd: number,
+  globalMaxUsd: number,
+  enforceMin: boolean,
+): number | undefined {
+  const cappedMax = Math.max(0, Math.min(maxUsd, globalMaxUsd));
+  if (cappedMax <= 0) return undefined;
+  const desired = Math.min(Math.max(targetUsd, 0), cappedMax);
+  if (!enforceMin) return desired > 0 ? desired : undefined;
+  const minRequired = Math.max(minUsd, 0);
+  if (cappedMax < minRequired) return undefined;
+  return Math.max(desired, minRequired);
+}
+
 function positionShares(state: AlphaBotState, marketId: string, outcome: AlphaOutcome): number {
   const position = state.positionsByMarket[marketId];
   if (!position) return 0;
@@ -49,6 +65,9 @@ export function generateQuotes(
   config: AlphaConfig,
 ): AlphaQuote[] {
   const quotes: AlphaQuote[] = [];
+  const rewardLaneEnabled = config.enableRewardLane;
+  const spreadLaneEnabled = config.enableSpreadLane && config.enableSpreadCapture;
+  const exitsEnabled = config.enableRewardLane || config.enableSpreadLane;
   for (const outcome of ["YES", "NO"] as const) {
     const outcomeBook = getOutcomeBook(book, outcome);
     const midpoint = outcomeBook.mid;
@@ -60,7 +79,10 @@ export function generateQuotes(
     const rewardMidpointAllowed = midpoint >= config.minMidpoint && midpoint <= config.maxMidpoint;
     const spreadEntryMidpointAllowed = midpoint >= config.minSpreadEntryMidpoint && midpoint <= config.maxSpreadMidpoint;
     const spreadExitMidpointAllowed = midpoint >= config.minSpreadExitMidpoint && midpoint <= config.maxSpreadMidpoint;
-    let bid = market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed ? midpoint - rewardBuffer : undefined;
+    let bid =
+      rewardLaneEnabled && market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
+        ? midpoint - rewardBuffer
+        : undefined;
     if (bid !== undefined && outcomeBook.ask !== undefined && bid >= outcomeBook.ask) {
       bid = outcomeBook.ask - 0.01;
     }
@@ -70,7 +92,14 @@ export function generateQuotes(
       (rewardSpread === undefined || Math.abs(midpoint - bid) <= rewardSpread) &&
       (spread === undefined || spread * 100 >= config.minMakerSpreadCents || market.reward.isRewardMarket)
     ) {
-      const sized = quoteSize(bid, Math.min(config.targetQuoteSizeUsd, config.maxOrderSizeUsd));
+      const rewardNotionalUsd = laneNotionalUsd(
+        config.rewardTargetQuoteSizeUsd,
+        config.rewardMinOrderSizeUsd,
+        config.rewardMaxOrderSizeUsd,
+        config.maxOrderSizeUsd,
+        true,
+      );
+      const sized = rewardNotionalUsd === undefined ? undefined : quoteSize(bid, rewardNotionalUsd);
       if (sized) {
         const rewardEligible =
           market.reward.isRewardMarket &&
@@ -96,9 +125,16 @@ export function generateQuotes(
       }
     }
 
-    const spreadBid = spreadEntryMidpointAllowed ? insideSpreadBid(outcomeBook, config) : undefined;
+    const spreadBid = spreadLaneEnabled && spreadEntryMidpointAllowed ? insideSpreadBid(outcomeBook, config) : undefined;
     if (spreadBid !== undefined) {
-      const sized = quoteSize(spreadBid, Math.min(config.spreadOrderSizeUsd, config.maxOrderSizeUsd));
+      const spreadNotionalUsd = laneNotionalUsd(
+        config.spreadTargetOrderSizeUsd,
+        config.spreadMinOrderSizeUsd,
+        config.spreadMaxOrderSizeUsd,
+        config.maxOrderSizeUsd,
+        true,
+      );
+      const sized = spreadNotionalUsd === undefined ? undefined : quoteSize(spreadBid, spreadNotionalUsd);
       if (sized) {
         quotes.push({
           id: `${market.marketAppId}:${outcome}:spread-bid:${Date.now()}`,
@@ -122,6 +158,7 @@ export function generateQuotes(
 
     const inventory = positionShares(state, market.id, outcome);
     if (inventory <= 0) continue;
+    if (!exitsEnabled) continue;
     let ask =
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
@@ -132,7 +169,14 @@ export function generateQuotes(
       ask = outcomeBook.bid + 0.01;
     }
     if (ask !== undefined && ask > 0 && ask < 1) {
-      const sized = quoteSize(ask, Math.min(config.spreadOrderSizeUsd, config.maxOrderSizeUsd));
+      const exitNotionalUsd = laneNotionalUsd(
+        config.spreadTargetOrderSizeUsd,
+        config.spreadMinOrderSizeUsd,
+        config.spreadMaxOrderSizeUsd,
+        config.maxOrderSizeUsd,
+        false,
+      );
+      const sized = exitNotionalUsd === undefined ? undefined : quoteSize(ask, exitNotionalUsd);
       if (sized) {
         const sizeShares = Math.min(sized.sizeShares, roundShares(inventory));
         if (sizeShares > 0) {
