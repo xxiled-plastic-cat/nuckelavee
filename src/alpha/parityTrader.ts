@@ -62,13 +62,8 @@ function validatePlan(
   plan: AlphaParityPlan,
   state: AlphaBotState,
   config: AlphaConfig,
-  walletUsdcBalanceUsd: number | undefined,
-  walletAlgoBalance: number | undefined,
   availableSlots: number,
 ): string | undefined {
-  if (walletAlgoBalance !== undefined && walletAlgoBalance < config.minAlgoBalance) {
-    return `wallet ALGO ${walletAlgoBalance.toFixed(6)} below safety floor ${config.minAlgoBalance.toFixed(2)}`;
-  }
   if (availableSlots <= 0) return "no MBR-aware live order slots available for parity market orders";
   if (plan.notionalUsd < config.parityMinTradeUsd) {
     return `trade notional $${plan.notionalUsd.toFixed(2)} below parity minimum $${config.parityMinTradeUsd.toFixed(2)}`;
@@ -84,12 +79,6 @@ function validatePlan(
   }
   if (dailyParityUsd(state) + plan.notionalUsd > config.parityMaxDailyUsd) {
     return `daily parity notional cap would exceed $${config.parityMaxDailyUsd.toFixed(2)}`;
-  }
-  if (walletUsdcBalanceUsd !== undefined && plan.type === "PARITY" && walletUsdcBalanceUsd < plan.notionalUsd) {
-    return `wallet USDC ${walletUsdcBalanceUsd.toFixed(2)} below parity cost ${plan.notionalUsd.toFixed(2)}`;
-  }
-  if (walletUsdcBalanceUsd !== undefined && plan.type === "SPLIT_MERGE" && walletUsdcBalanceUsd < plan.sizeShares) {
-    return `wallet USDC ${walletUsdcBalanceUsd.toFixed(2)} below split amount ${plan.sizeShares.toFixed(2)}`;
   }
   return undefined;
 }
@@ -163,11 +152,9 @@ export async function runParityLane(input: {
   config: AlphaConfig;
   liveClient: AlphaSdkClient;
   mode: ParityMode;
-  walletUsdcBalanceUsd?: number;
-  walletAlgoBalance?: number;
   availableSlots: number;
 }): Promise<ParityAction[]> {
-  const { scan, state, config, liveClient, mode, walletUsdcBalanceUsd, walletAlgoBalance, availableSlots } = input;
+  const { scan, state, config, liveClient, mode, availableSlots } = input;
   if (!config.enableParityLane) {
     return [{ kind: "skip", message: "Parity lane disabled (ALPHA_ENABLE_PARITY_LANE=false)" }];
   }
@@ -182,7 +169,7 @@ export async function runParityLane(input: {
   actions.push({ kind: "parity", message: `Parity: ${plans.length} executable candidate(s) detected` });
   const planWindow = plans.slice(0, Math.max(1, config.parityQueueLimit));
   for (const plan of planWindow) {
-    const rejection = validatePlan(plan, state, config, walletUsdcBalanceUsd, walletAlgoBalance, availableSlots);
+    const rejection = validatePlan(plan, state, config, availableSlots);
     if (rejection) {
       recordSkipped(state, plan, mode, rejection);
       actions.push({ kind: "skip", message: `Skipped parity ${plan.title}: ${rejection}` });
