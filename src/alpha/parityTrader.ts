@@ -62,9 +62,7 @@ function validatePlan(
   plan: AlphaParityPlan,
   state: AlphaBotState,
   config: AlphaConfig,
-  availableSlots: number,
 ): string | undefined {
-  if (availableSlots <= 0) return "no MBR-aware live order slots available for parity market orders";
   if (plan.notionalUsd < config.parityMinTradeUsd) {
     return `trade notional $${plan.notionalUsd.toFixed(2)} below parity minimum $${config.parityMinTradeUsd.toFixed(2)}`;
   }
@@ -152,9 +150,8 @@ export async function runParityLane(input: {
   config: AlphaConfig;
   liveClient: AlphaSdkClient;
   mode: ParityMode;
-  availableSlots: number;
 }): Promise<ParityAction[]> {
-  const { scan, state, config, liveClient, mode, availableSlots } = input;
+  const { scan, state, config, liveClient, mode } = input;
   if (!config.enableParityLane) {
     return [{ kind: "skip", message: "Parity lane disabled (ALPHA_ENABLE_PARITY_LANE=false)" }];
   }
@@ -169,7 +166,7 @@ export async function runParityLane(input: {
   actions.push({ kind: "parity", message: `Parity: ${plans.length} executable candidate(s) detected` });
   const planWindow = plans.slice(0, Math.max(1, config.parityQueueLimit));
   for (const plan of planWindow) {
-    const rejection = validatePlan(plan, state, config, availableSlots);
+    const rejection = validatePlan(plan, state, config);
     if (rejection) {
       recordSkipped(state, plan, mode, rejection);
       actions.push({ kind: "skip", message: `Skipped parity ${plan.title}: ${rejection}` });

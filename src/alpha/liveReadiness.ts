@@ -6,6 +6,5 @@ export function getLiveReadinessWarnings(config: AlphaConfig): string[] {
   if (!config.confirmRisk) warnings.push("ALPHA_CONFIRM_RISK is not true");
   if (!config.walletAddress) warnings.push("ALPHA_WALLET_ADDRESS is missing");
   if (!config.walletMnemonic) warnings.push("ALPHA_WALLET_MNEMONIC/PAYER_MNEMONIC is missing");
-  if (config.maxLiveOpenOrders > 4) warnings.push("ALPHA_MAX_LIVE_OPEN_ORDERS exceeds first-rollout cap");
   return warnings;
 }

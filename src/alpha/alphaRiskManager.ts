@@ -105,12 +105,6 @@ export function checkQuoteRisk(
   if (quote.notionalUsd > laneMaxOrderSizeUsd) {
     return { allowed: false, reason: `${lane} order size exceeds lane cap`, riskLevel: "high" };
   }
-  if (state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxOpenOrders) {
-    return { allowed: false, reason: "open order count exceeds cap", riskLevel: "medium" };
-  }
-  if (liveLikeMode && state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxLiveOpenOrders) {
-    return { allowed: false, reason: "live open order count exceeds ALGO MBR-aware cap", riskLevel: "high" };
-  }
   if (liveLikeMode && laneOpenOrderCount(state, lane, mode) >= laneMaxLiveOpenOrders) {
     return { allowed: false, reason: `${lane} lane open order count exceeds cap`, riskLevel: "high" };
   }

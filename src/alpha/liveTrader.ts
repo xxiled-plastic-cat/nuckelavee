@@ -704,13 +704,6 @@ export async function runLiveTick(
   }
   state.openOrders = state.openOrders.filter((order) => order.status === "open");
 
-  const openLiveOrders = state.openOrders.filter((order) => order.runMode === "live" && order.status === "open" && order.liveEscrowAppId !== undefined);
-  const slots = Math.max(0, config.maxLiveOpenOrders - openLiveOrders.length);
-  const parityReservedSlots = Math.min(config.paritySlotReserve, slots);
-  const parityAvailableSlots = parityReservedSlots > 0 ? parityReservedSlots : slots;
-  if (parityReservedSlots > 0) {
-    actions.push({ kind: "skip", message: `Reserved ${parityReservedSlots} slot(s) for parity lane` });
-  }
   actions.push(
     ...(await runParityLane({
       scan,
@@ -718,25 +711,10 @@ export async function runLiveTick(
       config,
       liveClient,
       mode,
-      availableSlots: parityAvailableSlots,
     })),
   );
-  const quoteSlots = Math.max(0, slots - parityReservedSlots);
-  if (quoteSlots === 0) {
-    actions.push({ kind: "skip", message: "No live order slots available under ALGO MBR-aware cap" });
-    if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return finalLiveTickResult(liveClient, config, actions, state);
-  }
 
   const laneQueues = buildLaneQueues(quotes, state, config);
-  const pendingExitSlots = Math.min(
-    config.spreadExitSlotReserve,
-    laneQueues.exits.length,
-    quoteSlots,
-  );
-  if (pendingExitSlots > 0) {
-    actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} live order slot(s) for inventory exits` });
-  }
   const openRewardOrders = state.openOrders.filter(
     (order) => order.runMode === "live" && order.status === "open" && order.source === "reward",
   ).length;
@@ -745,6 +723,15 @@ export async function runLiveTick(
   ).length;
   const rewardQueueCap = Math.max(0, config.rewardMaxLiveOpenOrders - openRewardOrders);
   const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadOrders);
+  const pendingExitSlots = Math.min(config.spreadExitSlotReserve, laneQueues.exits.length, spreadQueueCap);
+  if (pendingExitSlots > 0) {
+    actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} spread lane slot(s) for inventory exits` });
+  }
+  if (rewardQueueCap === 0 && spreadQueueCap === 0) {
+    actions.push({ kind: "skip", message: "No reward or spread lane order slots available" });
+    if (mode === "live") await saveAlphaState(config.stateKey, state);
+    return finalLiveTickResult(liveClient, config, actions, state);
+  }
   const placementQueue: AlphaQuote[] = [];
   const added = new Set<string>();
   let rewardQueued = 0;
@@ -753,13 +740,15 @@ export async function runLiveTick(
   const pushQuote = (quote: AlphaQuote): boolean => {
     const key = `${quote.marketAppId}:${quote.outcome}:${quote.side}:${quote.source}:${quote.price.toFixed(6)}`;
     if (added.has(key)) return false;
-    if (placementQueue.length >= quoteSlots) return false;
-    if (quote.source === "reward" && rewardQueued >= rewardQueueCap) return false;
-    if (quote.source !== "reward" && quote.source !== "inventory_exit" && spreadQueued >= spreadQueueCap) return false;
+    if (quote.source === "reward") {
+      if (rewardQueued >= rewardQueueCap) return false;
+    } else if (spreadQueued >= spreadQueueCap) {
+      return false;
+    }
     placementQueue.push(quote);
     added.add(key);
     if (quote.source === "reward") rewardQueued += 1;
-    if (quote.source === "spread") spreadQueued += 1;
+    else spreadQueued += 1;
     return true;
   };
 
@@ -767,15 +756,12 @@ export async function runLiveTick(
     if (!pushQuote(exit)) break;
   }
   for (const reward of laneQueues.reward) {
-    if (placementQueue.length >= quoteSlots) break;
     pushQuote(reward);
   }
   for (const spread of laneQueues.spread) {
-    if (placementQueue.length >= quoteSlots) break;
     pushQuote(spread);
   }
   for (const exit of laneQueues.exits.slice(pendingExitSlots)) {
-    if (placementQueue.length >= quoteSlots) break;
     pushQuote(exit);
   }
 
@@ -788,9 +774,7 @@ export async function runLiveTick(
     selectedRewardContractsByMarket.set(quote.marketAppId, (selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0) + quote.sizeShares);
   }
 
-  let slotsUsed = 0;
   for (const quote of placementQueue) {
-    if (slotsUsed >= quoteSlots) break;
     const aggregateRewardContracts = selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0;
     if (quote.source === "reward" && quote.rewardMinContracts !== undefined && aggregateRewardContracts < quote.rewardMinContracts) {
       actions.push({
@@ -811,7 +795,6 @@ export async function runLiveTick(
           2,
         )} / ${quote.sizeShares.toFixed(6)} shares; ${quote.reason}`,
       });
-      slotsUsed += 1;
       continue;
     }
     if (quote.side === "ask" && quote.source !== "inventory_exit") {
@@ -828,7 +811,6 @@ export async function runLiveTick(
       });
       state.openOrders.push(toTrackedLiveOrder(quote, result));
       state.strategyStats.liveOrdersPlaced += 1;
-      slotsUsed += 1;
       actions.push({ kind: "place", message: `Placed ${quote.title} ${quote.outcome} ${quote.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);
     } catch (error) {

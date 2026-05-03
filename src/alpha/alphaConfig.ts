@@ -217,8 +217,6 @@ export function validateLiveConfig(config: AlphaConfig): void {
   if (!config.confirmRisk) failures.push("ALPHA_CONFIRM_RISK must be true");
   if (!config.walletAddress) failures.push("ALPHA_WALLET_ADDRESS or a mnemonic-derived address is required");
   if (!config.walletMnemonic) failures.push("ALPHA_WALLET_MNEMONIC or PAYER_MNEMONIC is required");
-  if (config.maxLiveOpenOrders > 6) failures.push("ALPHA_MAX_LIVE_OPEN_ORDERS must be <= 6 for first rollout");
-  if (config.maxLiveOrdersPerMarket > 2) failures.push("ALPHA_MAX_LIVE_ORDERS_PER_MARKET must be <= 2 for first rollout");
   if (failures.length > 0) {
     throw new Error(`Live mode refused to start:\n- ${failures.join("\n- ")}`);
   }
