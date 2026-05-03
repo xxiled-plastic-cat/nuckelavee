@@ -19,10 +19,9 @@ function laneNotionalUsd(
   targetUsd: number,
   minUsd: number,
   maxUsd: number,
-  globalMaxUsd: number,
   enforceMin: boolean,
 ): number | undefined {
-  const cappedMax = Math.max(0, Math.min(maxUsd, globalMaxUsd));
+  const cappedMax = Math.max(0, maxUsd);
   if (cappedMax <= 0) return undefined;
   const desired = Math.min(Math.max(targetUsd, 0), cappedMax);
   if (!enforceMin) return desired > 0 ? desired : undefined;
@@ -96,7 +95,6 @@ export function generateQuotes(
         config.rewardTargetQuoteSizeUsd,
         config.rewardMinOrderSizeUsd,
         config.rewardMaxOrderSizeUsd,
-        config.maxOrderSizeUsd,
         true,
       );
       const sized = rewardNotionalUsd === undefined ? undefined : quoteSize(bid, rewardNotionalUsd);
@@ -131,7 +129,6 @@ export function generateQuotes(
         config.spreadTargetOrderSizeUsd,
         config.spreadMinOrderSizeUsd,
         config.spreadMaxOrderSizeUsd,
-        config.maxOrderSizeUsd,
         true,
       );
       const sized = spreadNotionalUsd === undefined ? undefined : quoteSize(spreadBid, spreadNotionalUsd);
@@ -173,7 +170,6 @@ export function generateQuotes(
         config.spreadTargetOrderSizeUsd,
         config.spreadMinOrderSizeUsd,
         config.spreadMaxOrderSizeUsd,
-        config.maxOrderSizeUsd,
         false,
       );
       const sized = exitNotionalUsd === undefined ? undefined : quoteSize(ask, exitNotionalUsd);

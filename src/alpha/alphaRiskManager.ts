@@ -105,9 +105,6 @@ export function checkQuoteRisk(
   if (quote.notionalUsd > laneMaxOrderSizeUsd) {
     return { allowed: false, reason: `${lane} order size exceeds lane cap`, riskLevel: "high" };
   }
-  if (quote.notionalUsd > config.maxOrderSizeUsd) {
-    return { allowed: false, reason: "order size exceeds max order size", riskLevel: "high" };
-  }
   if (state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode)).length >= config.maxOpenOrders) {
     return { allowed: false, reason: "open order count exceeds cap", riskLevel: "medium" };
   }
@@ -132,15 +129,6 @@ export function checkQuoteRisk(
   }
   if (laneOrderExposure(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
     return { allowed: false, reason: `${lane} total exposure would exceed lane cap`, riskLevel: "high" };
-  }
-  if (getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxMarketExposureUsd) {
-    return { allowed: false, reason: "market exposure would exceed cap", riskLevel: "high" };
-  }
-  if (quote.source !== "reward" && getMarketExposure(state, quote.marketId, mode) + addedExposure > config.maxSpreadMarketExposureUsd) {
-    return { allowed: false, reason: "spread market exposure would exceed cap", riskLevel: "medium" };
-  }
-  if (getTotalExposure(state, mode) + addedExposure > config.maxTotalExposureUsd) {
-    return { allowed: false, reason: "total exposure would exceed cap", riskLevel: "high" };
   }
   if (mode === "paper" && quote.side === "bid" && quote.notionalUsd > state.cash) {
     return { allowed: false, reason: "bid requires more cash than available", riskLevel: "high" };
