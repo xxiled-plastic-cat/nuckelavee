@@ -567,23 +567,6 @@ export async function runLiveTick(
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
   const actions: LiveAction[] = [];
   const liveClient = new AlphaSdkClient(config, mode === "live");
-  let walletUsdcBalanceUsd: number | undefined;
-  let walletAlgoBalance: number | undefined;
-  try {
-    walletUsdcBalanceUsd = await liveClient.getUsdcBalance(config.walletAddress);
-    walletAlgoBalance = await liveClient.getAlgoBalance(config.walletAddress);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[alpha-live] tick aborted during wallet balance fetch: ${message}`);
-    actions.push({ kind: "skip", message: `Tick aborted safely: ${message}` });
-    state.strategyStats.lastRunMode = mode;
-    if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return finalLiveTickResult(liveClient, config, actions, state, {
-      walletUsdcBalanceUsd,
-      walletAlgoBalance,
-      refreshBalances: false,
-    });
-  }
   const marketByAppId = new Map<number, AlphaMarket>();
   for (const market of [...scan.markets, ...scan.rewardMarkets]) {
     marketByAppId.set(market.marketAppId, market);
@@ -599,11 +582,7 @@ export async function runLiveTick(
     actions.push({ kind: "skip", message: `Tick aborted safely: ${message}` });
     state.strategyStats.lastRunMode = mode;
     if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return finalLiveTickResult(liveClient, config, actions, state, {
-      walletUsdcBalanceUsd,
-      walletAlgoBalance,
-      refreshBalances: false,
-    });
+    return finalLiveTickResult(liveClient, config, actions, state, { refreshBalances: false });
   }
   const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
@@ -699,15 +678,6 @@ export async function runLiveTick(
       });
       continue;
     }
-    if (walletAlgoBalance !== undefined && walletAlgoBalance < config.minAlgoBalance) {
-      actions.push({
-        kind: "skip",
-        message: `${mode === "live-dry-run" ? "Live would skip" : "Skipped"} cancel escrowAppId=${escrowAppId}; ${reason}; wallet ALGO ${walletAlgoBalance.toFixed(
-          6,
-        )} below safety floor ${config.minAlgoBalance.toFixed(2)}`,
-      });
-      continue;
-    }
     if (mode === "live-dry-run") {
       actions.push({ kind: "cancel", message: `Would cancel live order escrowAppId=${escrowAppId}; ${reason}` });
       continue;
@@ -734,17 +704,6 @@ export async function runLiveTick(
   }
   state.openOrders = state.openOrders.filter((order) => order.status === "open");
 
-  if (walletAlgoBalance !== undefined && walletAlgoBalance < config.minAlgoBalance) {
-    actions.push({
-      kind: "skip",
-      message: `${mode === "live-dry-run" ? "Live would skip" : "No live"} placements; wallet ALGO ${walletAlgoBalance.toFixed(
-        6,
-      )} below safety floor ${config.minAlgoBalance.toFixed(2)}`,
-    });
-    if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return finalLiveTickResult(liveClient, config, actions, state);
-  }
-
   const openLiveOrders = state.openOrders.filter((order) => order.runMode === "live" && order.status === "open" && order.liveEscrowAppId !== undefined);
   const slots = Math.max(0, config.maxLiveOpenOrders - openLiveOrders.length);
   const parityReservedSlots = Math.min(config.paritySlotReserve, slots);
@@ -759,8 +718,6 @@ export async function runLiveTick(
       config,
       liveClient,
       mode,
-      walletUsdcBalanceUsd,
-      walletAlgoBalance,
       availableSlots: parityAvailableSlots,
     })),
   );
