@@ -411,6 +411,21 @@ function describeMissingExit(
   return `exit looked possible for ${shares.toFixed(6)} share(s) but no quote was produced`;
 }
 
+function rewardOrderInsideCurrentZone(
+  order: AlphaPaperOrder,
+  market: AlphaMarket | undefined,
+  book: AlphaOrderbook | undefined,
+): boolean {
+  if (order.source !== "reward" || order.side !== "bid") return false;
+  if (!market?.reward.isRewardMarket) return false;
+  if (market.reward.maxRewardSpreadCents === undefined) return false;
+  if (!book || book.source === "unavailable") return false;
+  const midpoint = order.outcome === "YES" ? book.yesMid : book.noMid;
+  if (midpoint === undefined) return false;
+  const distanceCents = Math.abs(midpoint - order.price) * 100;
+  return distanceCents <= market.reward.maxRewardSpreadCents;
+}
+
 function addInventoryExitDiagnostics(
   actions: LiveAction[],
   state: AlphaBotState,
@@ -651,6 +666,8 @@ export async function runLiveTick(
   for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open")) {
     const escrowAppId = order.liveEscrowAppId;
     if (escrowAppId === undefined) continue;
+    const market = marketByAppId.get(order.marketAppId);
+    const book = scan.orderbooks.get(order.marketAppId);
     const intended = intendedQuoteByKey.get(quoteKey(order));
     if (intended && isEquivalentQuote(order, intended, config)) {
       order.reason = intended.reason;
@@ -668,6 +685,21 @@ export async function runLiveTick(
     const reason = intended
       ? `current quote moved ${quoteDeltaCents(order, intended).toFixed(2)}c`
       : "market no longer has a qualifying quote";
+    if (order.source === "reward" && order.side === "bid" && orderAgeSeconds(order) < config.rewardMinDwellSeconds) {
+      if (rewardOrderInsideCurrentZone(order, market, book)) {
+        actions.push({
+          kind: "skip",
+          message: `Kept reward order escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}/${
+            config.rewardMinDwellSeconds
+          }s while still inside reward zone`,
+        });
+        continue;
+      }
+      actions.push({
+        kind: "skip",
+        message: `Reward order escrowAppId=${escrowAppId} is under minimum dwell but outside current reward zone; allowing refresh`,
+      });
+    }
     if (order.source === "inventory_exit" && order.side === "ask" && orderAgeSeconds(order) < config.spreadExitMinDwellSeconds) {
       actions.push({
         kind: "skip",
