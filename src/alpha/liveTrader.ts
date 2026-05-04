@@ -556,6 +556,10 @@ function buildLaneQueues(quotes: AlphaQuote[], state: AlphaBotState, config: Alp
   return { reward, spread, exits };
 }
 
+function requiredBidUsdc(quote: AlphaQuote, config: AlphaConfig): number {
+  return quote.notionalUsd * (1 + config.liveBidUsdcBufferBps / 10_000);
+}
+
 export async function runLiveTick(
   scan: AlphaScanResult,
   config: AlphaConfig,
@@ -704,6 +708,24 @@ export async function runLiveTick(
   }
   state.openOrders = state.openOrders.filter((order) => order.status === "open");
 
+  let walletUsdcBalanceUsd: number | undefined;
+  let walletAlgoBalance: number | undefined;
+  if (mode === "live") {
+    try {
+      [walletUsdcBalanceUsd, walletAlgoBalance] = await Promise.all([
+        liveClient.getUsdcBalance(config.walletAddress),
+        liveClient.getAlgoBalance(config.walletAddress),
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[alpha-live] tick aborted during wallet balance sync: ${message}`);
+      actions.push({ kind: "skip", message: `Tick aborted safely: wallet balance sync failed: ${message}` });
+      state.strategyStats.lastRunMode = mode;
+      await saveAlphaState(config.stateKey, state);
+      return finalLiveTickResult(liveClient, config, actions, state, { refreshBalances: false });
+    }
+  }
+
   actions.push(
     ...(await runParityLane({
       scan,
@@ -711,6 +733,7 @@ export async function runLiveTick(
       config,
       liveClient,
       mode,
+      walletUsdcBalanceUsd,
     })),
   );
 
@@ -730,7 +753,7 @@ export async function runLiveTick(
   if (rewardQueueCap === 0 && spreadQueueCap === 0) {
     actions.push({ kind: "skip", message: "No reward or spread lane order slots available" });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
-    return finalLiveTickResult(liveClient, config, actions, state);
+    return finalLiveTickResult(liveClient, config, actions, state, { walletUsdcBalanceUsd, walletAlgoBalance });
   }
   const placementQueue: AlphaQuote[] = [];
   const added = new Set<string>();
@@ -774,6 +797,7 @@ export async function runLiveTick(
     selectedRewardContractsByMarket.set(quote.marketAppId, (selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0) + quote.sizeShares);
   }
 
+  let remainingLiveBidUsdc = walletUsdcBalanceUsd;
   for (const quote of placementQueue) {
     const aggregateRewardContracts = selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0;
     if (quote.source === "reward" && quote.rewardMinContracts !== undefined && aggregateRewardContracts < quote.rewardMinContracts) {
@@ -787,6 +811,22 @@ export async function runLiveTick(
     if (!risk.allowed) {
       actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} ${quote.side}: ${risk.reason}` });
       continue;
+    }
+    if (mode === "live" && quote.side === "bid") {
+      if (remainingLiveBidUsdc === undefined) {
+        actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} bid: wallet USDC unavailable; skipping live bid placement` });
+        continue;
+      }
+      const requiredUsdc = requiredBidUsdc(quote, config);
+      if (requiredUsdc > remainingLiveBidUsdc) {
+        actions.push({
+          kind: "skip",
+          message: `${quote.title} ${quote.outcome} bid: wallet USDC ${remainingLiveBidUsdc.toFixed(2)} below required ${requiredUsdc.toFixed(
+            2,
+          )} including ${(config.liveBidUsdcBufferBps / 100).toFixed(2)}% buffer`,
+        });
+        continue;
+      }
     }
     if (mode === "live-dry-run") {
       actions.push({
@@ -811,15 +851,21 @@ export async function runLiveTick(
       });
       state.openOrders.push(toTrackedLiveOrder(quote, result));
       state.strategyStats.liveOrdersPlaced += 1;
+      if (quote.side === "bid" && remainingLiveBidUsdc !== undefined) {
+        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quote, config));
+      }
       actions.push({ kind: "place", message: `Placed ${quote.title} ${quote.outcome} ${quote.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error(`[alpha-live] place failed ${quote.title} ${quote.outcome}: ${message}`);
+      if (quote.side === "bid" && message.includes("underflow on subtracting")) {
+        remainingLiveBidUsdc = 0;
+      }
       actions.push({ kind: "skip", message: `Place failed ${quote.title} ${quote.outcome}: ${message}` });
     }
   }
   state.strategyStats.lastRunMode = mode;
   if (mode === "live") await saveAlphaState(config.stateKey, state);
-  return finalLiveTickResult(liveClient, config, actions, state);
+  return finalLiveTickResult(liveClient, config, actions, state, { walletUsdcBalanceUsd, walletAlgoBalance });
 }

@@ -74,6 +74,7 @@ export type AlphaConfig = {
   maxOpenOrders: number;
   maxLiveOpenOrders: number;
   maxLiveOrdersPerMarket: number;
+  liveBidUsdcBufferBps: number;
   quoteRefreshThresholdCents: number;
   minAlgoBalance: number;
   rewardMinDwellSeconds: number;
@@ -198,6 +199,7 @@ export function readAlphaConfig(): AlphaConfig {
     maxOpenOrders: readInt("ALPHA_MAX_OPEN_ORDERS", 10),
     maxLiveOpenOrders: readInt("ALPHA_MAX_LIVE_OPEN_ORDERS", 6),
     maxLiveOrdersPerMarket: readInt("ALPHA_MAX_LIVE_ORDERS_PER_MARKET", 2),
+    liveBidUsdcBufferBps: readNumber("ALPHA_LIVE_BID_USDC_BUFFER_BPS", 750),
     quoteRefreshThresholdCents: readNumber("ALPHA_QUOTE_REFRESH_THRESHOLD_CENTS", 1),
     minAlgoBalance: readNumber("ALPHA_MIN_ALGO_BALANCE", 3),
     rewardMinDwellSeconds: readInt("ALPHA_REWARD_MIN_DWELL_SECONDS", 180),

@@ -62,6 +62,8 @@ function validatePlan(
   plan: AlphaParityPlan,
   state: AlphaBotState,
   config: AlphaConfig,
+  walletUsdcBalanceUsd: number | undefined,
+  enforceWalletUsdc: boolean,
 ): string | undefined {
   if (plan.notionalUsd < config.parityMinTradeUsd) {
     return `trade notional $${plan.notionalUsd.toFixed(2)} below parity minimum $${config.parityMinTradeUsd.toFixed(2)}`;
@@ -77,6 +79,16 @@ function validatePlan(
   }
   if (dailyParityUsd(state) + plan.notionalUsd > config.parityMaxDailyUsd) {
     return `daily parity notional cap would exceed $${config.parityMaxDailyUsd.toFixed(2)}`;
+  }
+  if (!enforceWalletUsdc) return undefined;
+  if (walletUsdcBalanceUsd === undefined) {
+    return "wallet USDC unavailable; skipping live parity trade";
+  }
+  const requiredUsdc = plan.notionalUsd * (1 + config.liveBidUsdcBufferBps / 10_000);
+  if (requiredUsdc > walletUsdcBalanceUsd) {
+    return `wallet USDC ${walletUsdcBalanceUsd.toFixed(2)} below parity requirement ${requiredUsdc.toFixed(2)} including ${(
+      config.liveBidUsdcBufferBps / 100
+    ).toFixed(2)}% buffer`;
   }
   return undefined;
 }
@@ -150,8 +162,9 @@ export async function runParityLane(input: {
   config: AlphaConfig;
   liveClient: AlphaSdkClient;
   mode: ParityMode;
+  walletUsdcBalanceUsd?: number;
 }): Promise<ParityAction[]> {
-  const { scan, state, config, liveClient, mode } = input;
+  const { scan, state, config, liveClient, mode, walletUsdcBalanceUsd } = input;
   if (!config.enableParityLane) {
     return [{ kind: "skip", message: "Parity lane disabled (ALPHA_ENABLE_PARITY_LANE=false)" }];
   }
@@ -166,7 +179,7 @@ export async function runParityLane(input: {
   actions.push({ kind: "parity", message: `Parity: ${plans.length} executable candidate(s) detected` });
   const planWindow = plans.slice(0, Math.max(1, config.parityQueueLimit));
   for (const plan of planWindow) {
-    const rejection = validatePlan(plan, state, config);
+    const rejection = validatePlan(plan, state, config, walletUsdcBalanceUsd, mode === "live");
     if (rejection) {
       recordSkipped(state, plan, mode, rejection);
       actions.push({ kind: "skip", message: `Skipped parity ${plan.title}: ${rejection}` });
