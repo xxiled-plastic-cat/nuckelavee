@@ -164,11 +164,11 @@ export class AlphaSdkClient {
   constructor(config: AlphaConfig, liveSigner: boolean) {
     const account =
       liveSigner && config.walletMnemonic ? algosdk.mnemonicToSecretKey(config.walletMnemonic) : algosdk.generateAccount();
-    this.algodClient = new algosdk.Algodv2("", config.algodServer, "");
+    this.algodClient = new algosdk.Algodv2(config.algodToken ?? "", config.algodServer, "");
     this.usdcAssetId = config.usdcAssetId;
     this.client = new AlphaClient({
       algodClient: this.algodClient,
-      indexerClient: new algosdk.Indexer("", config.indexerServer, ""),
+      indexerClient: new algosdk.Indexer(config.algodToken ?? "", config.indexerServer, ""),
       signer: algosdk.makeBasicAccountTransactionSigner(account),
       activeAddress: liveSigner && config.walletAddress ? config.walletAddress : account.addr.toString(),
       matcherAppId: config.matcherAppId,

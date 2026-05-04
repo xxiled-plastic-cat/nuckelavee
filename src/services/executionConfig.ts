@@ -24,6 +24,7 @@ export function readExecutionConfig(): ExecutionConfig {
     executionMode: getExecutionMode(),
     enableLiveTrading: getEnvBoolean("ENABLE_LIVE_TRADING", false),
     algodUrl: process.env.ALGOD_URL ?? "https://mainnet-api.algonode.cloud",
+    algodToken: process.env.ALGORAND_TOKEN || undefined,
     payerMnemonic: process.env.PAYER_MNEMONIC,
     orderQuantity: getEnvNumber("ORDER_QUANTITY", 1),
     minPriceCents: getEnvNumber("MIN_PRICE_CENTS", 2),

@@ -6,6 +6,7 @@ export type ExecutionConfig = {
   executionMode: ExecutionMode;
   enableLiveTrading: boolean;
   algodUrl: string;
+  algodToken?: string;
   payerMnemonic?: string;
   orderQuantity: number;
   minPriceCents: number;

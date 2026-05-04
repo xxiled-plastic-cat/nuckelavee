@@ -178,7 +178,7 @@ export async function executeDecision(
 
   const bot = loadAccount(config);
   const api = new Div3rsaFiClient();
-  const algod = new algosdk.Algodv2("", config.algodUrl, "");
+  const algod = new algosdk.Algodv2(config.algodToken ?? "", config.algodUrl, "");
 
   if (state.activeTarget) {
     await cancelOwnOpenOrders(api, algod, bot, state.activeTarget);

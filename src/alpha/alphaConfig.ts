@@ -5,6 +5,7 @@ export type AlphaMode = "scan" | "paper" | "live-dry-run" | "live";
 export type AlphaConfig = {
   apiKey?: string;
   algodServer: string;
+  algodToken?: string;
   indexerServer: string;
   matcherAppId: number;
   usdcAssetId: number;
@@ -118,8 +119,9 @@ export function readAlphaConfig(): AlphaConfig {
   const derivedWalletAddress = walletMnemonic ? algosdk.mnemonicToSecretKey(walletMnemonic).addr.toString() : undefined;
   return {
     apiKey: process.env.ALPHA_API_KEY || undefined,
-    algodServer: process.env.ALPHA_ALGOD_SERVER || "https://mainnet-api.algonode.cloud",
-    indexerServer: process.env.ALPHA_INDEXER_SERVER || "https://mainnet-idx.algonode.cloud",
+    algodServer: process.env.ALPHA_ALGOD_SERVER || "https://mainnet-api.4160.nodely.io",
+    algodToken: process.env.ALGORAND_TOKEN || undefined,
+    indexerServer: process.env.ALPHA_INDEXER_SERVER || "https://mainnet-idx.4160.nodely.io",
     matcherAppId: readInt("ALPHA_MATCHER_APP_ID", 3_078_581_851),
     usdcAssetId: readInt("ALPHA_USDC_ASSET_ID", 31_566_704),
     scanOrderbookLimit: readInt("ALPHA_SCAN_ORDERBOOK_LIMIT", 25),
