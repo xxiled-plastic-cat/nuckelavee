@@ -1,4 +1,5 @@
 import dotenv from "dotenv";
+import algosdk from "algosdk";
 
 import { readAlphaConfig } from "./alphaConfig.js";
 import { AlphaSdkClient } from "./alphaClient.js";
@@ -15,6 +16,10 @@ import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes 
 import { closeDatabase } from "../db.js";
 
 dotenv.config();
+
+const DEFAULT_REWARD_HISTORY_RECEIVER = "65GJKPMEYLR2C2GHFIAUKF2CFDE6IXDB3LUTOVJ424LBMMEWJ6UXCHCBZQ";
+const DEFAULT_REWARD_HISTORY_SENDER = "LPCTQJDOFBG5J63LOUY6A6JMHHHXIVOIZ7FLN6FETFSSWQOJR56V65INTU";
+const MICRO = 1_000_000n;
 
 async function buildScan(liveSigner = false) {
   const config = readAlphaConfig();
@@ -44,6 +49,149 @@ async function runMarketCommand(arg: string | undefined): Promise<void> {
   if (!market) throw new Error(`Alpha market not found: ${arg}`);
   const book = await client.getOrderbook(market);
   printMarketDetail(market, book);
+}
+
+function formatMicroUsdc(value: bigint): string {
+  const whole = value / MICRO;
+  const fraction = (value % MICRO).toString().padStart(6, "0");
+  return `${whole.toString()}.${fraction}`;
+}
+
+function parseNextToken(response: Record<string, unknown>): string | undefined {
+  const nextToken = response["next-token"];
+  if (typeof nextToken === "string" && nextToken.length > 0) return nextToken;
+  const next = response.next;
+  if (typeof next === "string" && next.length > 0) return next;
+  const camel = response.nextToken;
+  if (typeof camel === "string" && camel.length > 0) return camel;
+  return undefined;
+}
+
+function parseBigIntAmount(value: unknown): bigint | undefined {
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return BigInt(Math.floor(value));
+  if (typeof value === "string" && value.length > 0) {
+    try {
+      return BigInt(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+type ParsedAssetTransfer = {
+  sender?: string;
+  receiver?: string;
+  assetId?: bigint;
+  amount?: bigint;
+};
+
+function collectAssetTransfers(txn: Record<string, unknown>, inheritedSender?: string): ParsedAssetTransfer[] {
+  const transfers: ParsedAssetTransfer[] = [];
+  const sender = typeof txn.sender === "string" ? txn.sender : inheritedSender;
+  const transfer = txn["assetTransferTransaction"];
+  if (transfer && typeof transfer === "object") {
+    const payload = transfer as Record<string, unknown>;
+    const parsed: ParsedAssetTransfer = {
+      sender: typeof payload.sender === "string" ? payload.sender : sender,
+      receiver: typeof payload.receiver === "string" ? payload.receiver : undefined,
+      assetId: parseBigIntAmount(payload["assetId"] ?? payload.assetId),
+      amount: parseBigIntAmount(payload.amount),
+    };
+    transfers.push(parsed);
+  }
+  const inner = txn["innerTxns"];
+  if (Array.isArray(inner)) {
+    for (const child of inner) {
+      if (child && typeof child === "object") {
+        transfers.push(...collectAssetTransfers(child as Record<string, unknown>, sender));
+      }
+    }
+  }
+  return transfers;
+}
+
+async function runRewardHistoryCommand(receiverArg: string | undefined, senderArg: string | undefined): Promise<void> {
+  const config = readAlphaConfig();
+  const receiver = (receiverArg || process.env.ALPHA_REWARD_HISTORY_RECEIVER || DEFAULT_REWARD_HISTORY_RECEIVER).trim();
+  const sender = (senderArg || process.env.ALPHA_REWARD_HISTORY_SENDER || DEFAULT_REWARD_HISTORY_SENDER).trim();
+  if (!algosdk.isValidAddress(receiver)) {
+    throw new Error(`Invalid Algorand receiver address for rewards history: ${receiver}`);
+  }
+  if (!algosdk.isValidAddress(sender)) {
+    throw new Error(`Invalid Algorand sender address for rewards history: ${sender}`);
+  }
+
+  const indexer = new algosdk.Indexer(config.algodToken ?? "", config.indexerServer, "");
+  let nextToken: string | undefined;
+  let pageCount = 0;
+  let transactionCount = 0;
+  let incomingTransferCount = 0;
+  let incomingTotalMicroUsdc = 0n;
+  let rewardTransferCount = 0;
+  let rewardTotalMicroUsdc = 0n;
+  let pageLimit = 200;
+
+  while (true) {
+    let response: Record<string, unknown> | undefined;
+    let attempts = 0;
+    while (!response) {
+      attempts += 1;
+      try {
+        let query = indexer.searchForTransactions().address(receiver).limit(pageLimit);
+        if (nextToken) {
+          query = query.nextToken(nextToken);
+        }
+        response = (await query.do()) as unknown as Record<string, unknown>;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const timedOut = message.toLowerCase().includes("statement timeout");
+        if (!timedOut || attempts >= 4) {
+          throw new Error(
+            `Reward history scan failed on page ${pageCount + 1} (next=${nextToken ?? "none"}, limit=${pageLimit}): ${message}`,
+          );
+        }
+        pageLimit = Math.max(25, Math.floor(pageLimit / 2));
+        await new Promise((resolve) => setTimeout(resolve, 500 * attempts));
+      }
+    }
+    const transactions = Array.isArray(response.transactions) ? response.transactions : [];
+    pageCount += 1;
+    transactionCount += transactions.length;
+
+    for (const transaction of transactions as Array<Record<string, unknown>>) {
+      const transfers = collectAssetTransfers(transaction);
+      for (const transfer of transfers) {
+        if (transfer.receiver !== receiver) continue;
+        if (transfer.assetId !== BigInt(config.usdcAssetId)) continue;
+        if (transfer.amount === undefined) continue;
+        const amount = transfer.amount;
+        incomingTotalMicroUsdc += amount;
+        incomingTransferCount += 1;
+        if (transfer.sender === sender) {
+          rewardTotalMicroUsdc += amount;
+          rewardTransferCount += 1;
+        }
+      }
+    }
+
+    const parsedNext = parseNextToken(response);
+    if (!parsedNext || parsedNext === nextToken || transactions.length === 0) break;
+    nextToken = parsedNext;
+  }
+
+  console.log("NUCKELAVEE ALPHA REWARD HISTORY");
+  console.log("");
+  console.log(`Receiver: ${receiver}`);
+  console.log(`Reward sender filter: ${sender}`);
+  console.log(`USDC asset ID: ${config.usdcAssetId}`);
+  console.log(`Pages scanned: ${pageCount}`);
+  console.log(`Transactions gathered before filtering: ${transactionCount}`);
+  console.log(`Incoming USDC transfers (all senders): ${incomingTransferCount}`);
+  console.log(`Incoming USDC total (all senders): ${formatMicroUsdc(incomingTotalMicroUsdc)}`);
+  console.log(`Reward transfers (filtered sender): ${rewardTransferCount}`);
+  console.log(`Total rewards received: ${formatMicroUsdc(rewardTotalMicroUsdc)}`);
 }
 
 async function runPaperCommand(): Promise<void> {
@@ -247,13 +395,17 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
 }
 
 function printUsage(): void {
-  console.log("Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|watch|market|paper|paper-watch|paper-report|live-dry-run|live>");
+  console.log(
+    "Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|reward-history|watch|market|paper|paper-watch|paper-report|live-dry-run|live>",
+  );
+  console.log("  reward-history args: [receiverAddress] [rewardSenderAddress]");
 }
 
 async function main(): Promise<void> {
   const command = process.argv[2];
   if (command === "scan") return runScanCommand();
   if (command === "rewards") return runRewardsCommand();
+  if (command === "reward-history") return runRewardHistoryCommand(process.argv[3], process.argv[4]);
   if (command === "watch") return runPaperWatchCommand();
   if (command === "market") return runMarketCommand(process.argv[3]);
   if (command === "paper") return runPaperCommand();

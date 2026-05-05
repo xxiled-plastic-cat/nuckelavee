@@ -11,6 +11,7 @@
     "watch-exec": "tsx src/index.ts watch-exec",
     "alpha:scan": "tsx src/alpha/alphaCommands.ts scan",
     "alpha:rewards": "tsx src/alpha/alphaCommands.ts rewards",
+    "alpha:reward-history": "tsx src/alpha/alphaCommands.ts reward-history",
     "alpha:watch": "tsx src/alpha/alphaCommands.ts watch",
     "alpha:market": "tsx src/alpha/alphaCommands.ts market",
     "alpha:paper": "tsx src/alpha/alphaCommands.ts paper",
