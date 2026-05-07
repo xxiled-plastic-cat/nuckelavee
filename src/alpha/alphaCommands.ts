@@ -7,7 +7,15 @@ import { loadAlphaScan } from "./alphaMarketScanner.js";
 import { rankRewardCandidates } from "./alphaRewardScanner.js";
 import { scanParity } from "./alphaParityScanner.js";
 import { saveAlphaState } from "./alphaStateStore.js";
-import { printLiveSummary, printMarketDetail, printPaperReport, printPaperWatch, printRewards, printScan } from "./alphaFormatter.js";
+import {
+  printLiveSummary,
+  printMarketDetail,
+  printPaperReport,
+  printPaperWatch,
+  printRewards,
+  printScan,
+  summarizeLiveExposure,
+} from "./alphaFormatter.js";
 import type { AlphaBotState } from "./alphaTypes.js";
 import { runPaperTick, loadPaperReport } from "./paperTrader.js";
 import type { LiveAction } from "./liveTrader.js";
@@ -287,11 +295,10 @@ function buildTickDigestMessage(result: {
   state: AlphaBotState;
   walletUsdcBalanceUsd?: number;
   walletAlgoBalance?: number;
+  config: ReturnType<typeof readAlphaConfig>;
 }): string {
   const actionSummary = summarizeTickActions(result.actions);
-  const open = result.state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
-  const rewardEligible = open.filter((order) => order.rewardEligible).length;
-  const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
+  const exposure = summarizeLiveExposure(result.state, result.config);
   const tickAt = new Date().toISOString();
 
   return [
@@ -299,9 +306,19 @@ function buildTickDigestMessage(result: {
     `placed=${actionSummary.placed.length} cancelled=${actionSummary.cancelled.length} inferred_entry_fills=${actionSummary.inferredEntryFills.length} inferred_exit_fills=${actionSummary.inferredExitFills.length}`,
     `wallet_usdc=${formatUsd(result.walletUsdcBalanceUsd)}`,
     `wallet_algo=${result.walletAlgoBalance === undefined ? "unknown" : result.walletAlgoBalance.toFixed(6)}`,
-    `open_orders=${open.length} reward_eligible=${rewardEligible} exposure=${formatUsd(exposure)}`,
+    `open_orders=${exposure.openOrders} bid_orders=${exposure.bidOrders} exit_orders=${exposure.exitOrders}`,
+    `bid_exposure=${formatUsd(exposure.bidExposureUsd)} reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)} reward_eligible_bid_exposure=${formatUsd(
+      exposure.rewardEligibleBidExposureUsd,
+    )} spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
+    `exit_notional=${formatUsd(exposure.exitNotionalUsd)} reward_eligible_exit_notional=${formatUsd(
+      exposure.rewardEligibleExitNotionalUsd,
+    )} exits_not_counted_as_exposure=true`,
+    `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)} realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
-    `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)} est_rewards=${formatUsd(result.state.estimatedRewardsUsd)}`,
+    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day potential_reward_rate=${formatRewardUsd(
+      exposure.potentialRewardRateDailyUsd,
+    )}/day est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
+    `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
     `warnings=${compactLines(actionSummary.warnings, 1)}`,
@@ -327,6 +344,12 @@ function formatUsd(value: number | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
+function formatRewardUsd(value: number | undefined): string {
+  if (value === undefined) return "unknown";
+  const decimals = Math.abs(value) < 0.01 ? 6 : 2;
+  return `$${value.toFixed(decimals)}`;
+}
+
 function shouldSendDailySummary(state: AlphaBotState): boolean {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -336,22 +359,36 @@ function shouldSendDailySummary(state: AlphaBotState): boolean {
   return now.getUTCHours() === targetHour;
 }
 
-function buildDailySummaryMessage(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number): string {
-  const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
-  const rewardEligible = open.filter((order) => order.rewardEligible).length;
-  const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
+function buildDailySummaryMessage(
+  state: AlphaBotState,
+  walletUsdcBalanceUsd?: number,
+  walletAlgoBalance?: number,
+  config?: ReturnType<typeof readAlphaConfig>,
+): string {
+  const exposure = summarizeLiveExposure(state, config);
   const date = new Date().toISOString().slice(0, 10);
   return [
     `Daily summary ${date}`,
     `wallet_usdc=${formatUsd(walletUsdcBalanceUsd)}`,
     `wallet_algo=${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`,
-    `open_orders=${open.length}`,
-    `reward_eligible=${rewardEligible}`,
-    `exposure=${formatUsd(exposure)}`,
+    `open_orders=${exposure.openOrders}`,
+    `bid_orders=${exposure.bidOrders}`,
+    `exit_orders=${exposure.exitOrders}`,
+    `bid_exposure=${formatUsd(exposure.bidExposureUsd)}`,
+    `reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)}`,
+    `reward_eligible_bid_exposure=${formatUsd(exposure.rewardEligibleBidExposureUsd)}`,
+    `spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
+    `exit_notional=${formatUsd(exposure.exitNotionalUsd)}`,
+    `reward_eligible_exit_notional=${formatUsd(exposure.rewardEligibleExitNotionalUsd)}`,
+    `exits_not_counted_as_exposure=true`,
+    `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
+    `realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `trading_pnl=${formatUsd(state.totalPnl)}`,
+    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day`,
+    `potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day`,
     `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)}`,
     `parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
-    `est_rewards=${formatUsd(state.estimatedRewardsUsd)}`,
+    `est_rewards_accrued=${formatRewardUsd(state.estimatedRewardsUsd)}`,
     `live_placed=${state.strategyStats.liveOrdersPlaced}`,
     `live_cancelled=${state.strategyStats.liveOrdersCancelled}`,
   ].join("\n");
@@ -373,11 +410,11 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
     );
   }
   if (mode === "live") {
-    const digest = buildTickDigestMessage(result);
+    const digest = buildTickDigestMessage({ ...result, config });
     await notifyTelegram(digest);
   }
   if (mode === "live" && shouldSendDailySummary(result.state)) {
-    const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance);
+    const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config);
     const sent = await notifyTelegram(dailySummary);
     if (sent) {
       result.state.notificationState ??= {};
@@ -391,7 +428,7 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
     console.log(`[${action.kind.toUpperCase()}] ${action.message}`);
   }
   if (result.actions.length === 0) console.log("No actions.");
-  printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance);
+  printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config);
 }
 
 function printUsage(): void {

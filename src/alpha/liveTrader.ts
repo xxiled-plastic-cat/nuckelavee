@@ -7,6 +7,8 @@ import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPap
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
 import { generateQuotes } from "./quoteEngine.js";
 import { runParityLane } from "./parityTrader.js";
+import { updateUnrealisedPnl } from "./pnlTracker.js";
+import { accrueEstimatedRewards } from "./rewardTracker.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 
 export type LiveAction = {
@@ -79,9 +81,15 @@ function quoteDeltaCents(order: AlphaPaperOrder, quote: AlphaQuote): number {
   return Math.abs(order.price - quote.price) * 100;
 }
 
+function quoteSizeDeltaUsd(order: AlphaPaperOrder, quote: AlphaQuote): number {
+  return Math.abs(order.price * order.remainingShares - quote.notionalUsd);
+}
+
 function isEquivalentQuote(order: AlphaPaperOrder, quote: AlphaQuote, config: AlphaConfig): boolean {
   if (quoteKey(order) !== quoteKey(quote)) return false;
-  return quoteDeltaCents(order, quote) <= config.quoteRefreshThresholdCents;
+  if (quoteDeltaCents(order, quote) > config.quoteRefreshThresholdCents) return false;
+  const sizeToleranceUsd = Math.max(0.1, quote.notionalUsd * 0.1);
+  return quoteSizeDeltaUsd(order, quote) <= sizeToleranceUsd;
 }
 
 function orderAgeSeconds(order: Pick<AlphaPaperOrder, "createdAt">): number {
@@ -426,6 +434,14 @@ function rewardOrderInsideCurrentZone(
   return distanceCents <= market.reward.maxRewardSpreadCents;
 }
 
+function exitOrderWouldLoseMoney(order: AlphaPaperOrder, state: AlphaBotState, config: AlphaConfig): boolean {
+  if (order.source !== "inventory_exit" || order.side !== "ask") return false;
+  const position = state.positionsByMarket[order.marketId];
+  const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
+  if (averageCost === undefined || averageCost <= 0) return false;
+  return order.price < averageCost + config.spreadExitEdgeCents / 100;
+}
+
 function addInventoryExitDiagnostics(
   actions: LiveAction[],
   state: AlphaBotState,
@@ -623,6 +639,8 @@ export async function runLiveTick(
   } else {
     state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
   }
+  accrueEstimatedRewards(state, config);
+  updateUnrealisedPnl(state, scan.orderbooks);
   const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
   actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
   const allExecutionLanesDisabled = !config.enableRewardLane && !config.enableSpreadLane && !config.enableParityLane;
@@ -700,7 +718,12 @@ export async function runLiveTick(
         message: `Reward order escrowAppId=${escrowAppId} is under minimum dwell but outside current reward zone; allowing refresh`,
       });
     }
-    if (order.source === "inventory_exit" && order.side === "ask" && orderAgeSeconds(order) < config.spreadExitMinDwellSeconds) {
+    if (exitOrderWouldLoseMoney(order, state, config)) {
+      actions.push({
+        kind: "skip",
+        message: `Inventory exit escrowAppId=${escrowAppId} is below tracked cost plus ${config.spreadExitEdgeCents.toFixed(2)}c; allowing cancellation`,
+      });
+    } else if (order.source === "inventory_exit" && order.side === "ask" && orderAgeSeconds(order) < config.spreadExitMinDwellSeconds) {
       actions.push({
         kind: "skip",
         message: `Kept inventory exit escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}s/${config.spreadExitMinDwellSeconds}s before reconsidering`,
@@ -742,20 +765,21 @@ export async function runLiveTick(
 
   let walletUsdcBalanceUsd: number | undefined;
   let walletAlgoBalance: number | undefined;
-  if (mode === "live") {
-    try {
-      [walletUsdcBalanceUsd, walletAlgoBalance] = await Promise.all([
-        liveClient.getUsdcBalance(config.walletAddress),
-        liveClient.getAlgoBalance(config.walletAddress),
-      ]);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[alpha-live] tick aborted during wallet balance sync: ${message}`);
+  try {
+    [walletUsdcBalanceUsd, walletAlgoBalance] = await Promise.all([
+      liveClient.getUsdcBalance(config.walletAddress),
+      liveClient.getAlgoBalance(config.walletAddress),
+    ]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[alpha-live] tick aborted during wallet balance sync: ${message}`);
+    if (mode === "live") {
       actions.push({ kind: "skip", message: `Tick aborted safely: wallet balance sync failed: ${message}` });
       state.strategyStats.lastRunMode = mode;
       await saveAlphaState(config.stateKey, state);
       return finalLiveTickResult(liveClient, config, actions, state, { refreshBalances: false });
     }
+    actions.push({ kind: "skip", message: `Wallet balance sync failed; dry-run bid budget checks disabled: ${message}` });
   }
 
   actions.push(
@@ -844,7 +868,7 @@ export async function runLiveTick(
       actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} ${quote.side}: ${risk.reason}` });
       continue;
     }
-    if (mode === "live" && quote.side === "bid") {
+    if ((mode === "live" || mode === "live-dry-run") && quote.side === "bid") {
       if (remainingLiveBidUsdc === undefined) {
         actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} bid: wallet USDC unavailable; skipping live bid placement` });
         continue;
@@ -861,6 +885,9 @@ export async function runLiveTick(
       }
     }
     if (mode === "live-dry-run") {
+      if (quote.side === "bid" && remainingLiveBidUsdc !== undefined) {
+        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quote, config));
+      }
       actions.push({
         kind: "place",
         message: `Would place ${quote.source} ${quote.title} ${quote.outcome} ${quote.side} ${quote.price.toFixed(3)} size $${quote.notionalUsd.toFixed(

@@ -36,6 +36,13 @@ function positionShares(state: AlphaBotState, marketId: string, outcome: AlphaOu
   return outcome === "YES" ? position.yesShares : position.noShares;
 }
 
+function positionAverageCost(state: AlphaBotState, marketId: string, outcome: AlphaOutcome): number | undefined {
+  const position = state.positionsByMarket[marketId];
+  if (!position) return undefined;
+  const averageCost = outcome === "YES" ? position.avgYesCost : position.avgNoCost;
+  return averageCost > 0 ? averageCost : undefined;
+}
+
 function insideSpreadBid(book: { bid?: number; ask?: number; mid?: number; spread?: number }, config: AlphaConfig): number | undefined {
   if (!config.enableSpreadCapture || book.bid === undefined || book.ask === undefined || book.mid === undefined || book.spread === undefined) {
     return undefined;
@@ -156,6 +163,7 @@ export function generateQuotes(
     const inventory = positionShares(state, market.id, outcome);
     if (inventory <= 0) continue;
     if (!exitsEnabled) continue;
+    const averageCost = positionAverageCost(state, market.id, outcome);
     let ask =
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
@@ -164,6 +172,10 @@ export function generateQuotes(
           : undefined;
     if (ask !== undefined && outcomeBook.bid !== undefined && ask <= outcomeBook.bid) {
       ask = outcomeBook.bid + 0.01;
+    }
+    if (ask !== undefined && averageCost !== undefined) {
+      const minimumProfitableAsk = averageCost + config.spreadExitEdgeCents / 100;
+      if (ask < minimumProfitableAsk) continue;
     }
     if (ask !== undefined && ask > 0 && ask < 1) {
       const exitNotionalUsd = laneNotionalUsd(

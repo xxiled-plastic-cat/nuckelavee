@@ -8,6 +8,13 @@ export function fmtUsd(value: number | undefined): string {
   return `${sign}$${value.toFixed(2)}`;
 }
 
+export function fmtRewardUsd(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  const sign = value > 0 ? "+" : "";
+  const decimals = Math.abs(value) < 0.01 ? 6 : 2;
+  return `${sign}$${value.toFixed(decimals)}`;
+}
+
 export function fmtPrice(value: number | undefined): string {
   return value === undefined || !Number.isFinite(value) ? "-" : value.toFixed(3);
 }
@@ -240,26 +247,121 @@ export function printPaperWatch(state: AlphaBotState): void {
   );
 }
 
-export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number): void {
+export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaConfig, "estimatedRewardShare" | "rewardMinDwellSeconds">): {
+  openOrders: number;
+  bidOrders: number;
+  exitOrders: number;
+  bidExposureUsd: number;
+  rewardBidOrders: number;
+  rewardBidExposureUsd: number;
+  rewardEligibleBidOrders: number;
+  rewardEligibleBidExposureUsd: number;
+  spreadBidOrders: number;
+  spreadBidExposureUsd: number;
+  exitNotionalUsd: number;
+  exitPnlIfFilledUsd: number;
+  realisedPlusOpenExitPnlUsd: number;
+  rewardEligibleExitOrders: number;
+  rewardEligibleExitNotionalUsd: number;
+  activeRewardBidOrders: number;
+  activeRewardRateDailyUsd: number;
+  activeRewardRateHourlyUsd: number;
+  potentialRewardRateDailyUsd: number;
+  potentialRewardRateHourlyUsd: number;
+} {
   const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
-  const rewardEligible = open.filter((order) => order.rewardEligible).length;
-  const exposure = open.reduce((sum, order) => sum + (order.side === "bid" ? order.price * order.remainingShares : 0), 0);
+  const bids = open.filter((order) => order.side === "bid");
+  const rewardBids = bids.filter((order) => order.source === "reward");
+  const rewardEligibleBids = bids.filter((order) => order.rewardEligible);
+  const spreadBids = bids.filter((order) => order.source === "spread");
+  const exits = open.filter((order) => order.side === "ask" || order.source === "inventory_exit");
+  const rewardEligibleExits = exits.filter((order) => order.rewardEligible);
+  const bidExposure = (orders: typeof bids) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
+  const exitNotional = (orders: typeof exits) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
+  const exitPnlIfFilledUsd = exits.reduce((sum, order) => {
+    const position = state.positionsByMarket[order.marketId];
+    const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
+    return sum + (order.price - (averageCost ?? 0)) * order.remainingShares;
+  }, 0);
+  const rewardShare = config?.estimatedRewardShare ?? 0;
+  const minDwellSeconds = config?.rewardMinDwellSeconds ?? 0;
+  const now = Date.now();
+  const marketEligibility = new Map<string, { restingContracts: number; minContracts: number }>();
+  for (const order of rewardEligibleBids) {
+    const current = marketEligibility.get(order.marketId) ?? { restingContracts: 0, minContracts: order.rewardMinContracts ?? 0 };
+    current.restingContracts += order.remainingShares;
+    current.minContracts = Math.max(current.minContracts, order.rewardMinContracts ?? 0);
+    marketEligibility.set(order.marketId, current);
+  }
+  const activeRewardBids = rewardEligibleBids.filter((order) => {
+    const created = Date.parse(order.createdAt);
+    const ageSeconds = Number.isFinite(created) ? Math.max(0, (now - created) / 1000) : 0;
+    const eligibility = marketEligibility.get(order.marketId);
+    return ageSeconds >= minDwellSeconds && (eligibility?.restingContracts ?? 0) >= (eligibility?.minContracts ?? 0);
+  });
+  const rewardRateDaily = (orders: typeof rewardEligibleBids) =>
+    orders.reduce((sum, order) => sum + (order.estimatedRewardUsdPerDay ?? 0) * rewardShare, 0);
+  const activeRewardRateDailyUsd = rewardRateDaily(activeRewardBids);
+  const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleBids);
+
+  return {
+    openOrders: open.length,
+    bidOrders: bids.length,
+    exitOrders: exits.length,
+    bidExposureUsd: bidExposure(bids),
+    rewardBidOrders: rewardBids.length,
+    rewardBidExposureUsd: bidExposure(rewardBids),
+    rewardEligibleBidOrders: rewardEligibleBids.length,
+    rewardEligibleBidExposureUsd: bidExposure(rewardEligibleBids),
+    spreadBidOrders: spreadBids.length,
+    spreadBidExposureUsd: bidExposure(spreadBids),
+    exitNotionalUsd: exitNotional(exits),
+    exitPnlIfFilledUsd,
+    realisedPlusOpenExitPnlUsd: state.realisedPnl + exitPnlIfFilledUsd,
+    rewardEligibleExitOrders: rewardEligibleExits.length,
+    rewardEligibleExitNotionalUsd: exitNotional(rewardEligibleExits),
+    activeRewardBidOrders: activeRewardBids.length,
+    activeRewardRateDailyUsd,
+    activeRewardRateHourlyUsd: activeRewardRateDailyUsd / 24,
+    potentialRewardRateDailyUsd,
+    potentialRewardRateHourlyUsd: potentialRewardRateDailyUsd / 24,
+  };
+}
+
+export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number, config?: AlphaConfig): void {
+  const exposure = summarizeLiveExposure(state, config);
   console.log("");
   console.log(`[${new Date().toISOString().slice(11, 19)}] liveSummary`);
   console.log(`  walletUsdc: ${fmtUsd(walletUsdcBalanceUsd)}`);
   console.log(`  walletAlgo: ${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`);
-  console.log(`  openOrders: ${open.length}`);
-  console.log(`  rewardEligible: ${rewardEligible}`);
-  console.log(`  exposure: ${fmtUsd(exposure)}`);
+  console.log(`  openOrders: ${exposure.openOrders}`);
+  console.log(`  bidOrders: ${exposure.bidOrders}`);
+  console.log(`  exitOrders: ${exposure.exitOrders}`);
+  console.log(`  bidExposure: ${fmtUsd(exposure.bidExposureUsd)}`);
+  console.log(`  rewardBidExposure: ${fmtUsd(exposure.rewardBidExposureUsd)} (${exposure.rewardBidOrders} order(s))`);
+  console.log(`  rewardEligibleBidExposure: ${fmtUsd(exposure.rewardEligibleBidExposureUsd)} (${exposure.rewardEligibleBidOrders} order(s))`);
+  console.log(`  spreadBidExposure: ${fmtUsd(exposure.spreadBidExposureUsd)} (${exposure.spreadBidOrders} order(s))`);
+  console.log(`  exitNotional: ${fmtUsd(exposure.exitNotionalUsd)} (${exposure.exitOrders} order(s), not counted as exposure)`);
+  console.log(`  exitPnlIfFilled: ${fmtUsd(exposure.exitPnlIfFilledUsd)}`);
+  console.log(`  realisedPlusOpenExitPnl: ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`);
+  console.log(
+    `  rewardEligibleExitNotional: ${fmtUsd(exposure.rewardEligibleExitNotionalUsd)} (${exposure.rewardEligibleExitOrders} order(s), not counted as exposure)`,
+  );
   console.log(`  realisedPnl: ${fmtUsd(state.realisedPnl)}`);
   console.log(`  unrealisedPnl: ${fmtUsd(state.unrealisedPnl)}`);
   console.log(`  tradingPnl: ${fmtUsd(state.totalPnl)}`);
+  console.log(
+    `  activeRewardRate: ${fmtRewardUsd(exposure.activeRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour, ${
+      exposure.activeRewardBidOrders
+    } active bid(s))`,
+  );
+  console.log(`  potentialRewardRate: ${fmtRewardUsd(exposure.potentialRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour)`);
   console.log(`  spreadPnl: ${fmtUsd(state.strategyStats.spreadRealisedPnl)}`);
   console.log(`  spreadFills: ${state.strategyStats.spreadEntryFills}/${state.strategyStats.spreadExitFills}`);
   console.log(`  parityPnl: ${fmtUsd(state.strategyStats.parityGrossPnl)}`);
   console.log(`  parityTrades: ${state.strategyStats.parityTradesExecuted}`);
   console.log(`  parityFailed: ${state.strategyStats.parityFailedLegs}`);
-  console.log(`  estRewards: ${fmtUsd(state.estimatedRewardsUsd)}`);
+  console.log(`  estRewardsAccrued: ${fmtRewardUsd(state.estimatedRewardsUsd)}`);
   console.log(`  livePlaced: ${state.strategyStats.liveOrdersPlaced}`);
   console.log(`  liveCancelled: ${state.strategyStats.liveOrdersCancelled}`);
 }
