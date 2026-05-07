@@ -11,6 +11,8 @@ import { updateUnrealisedPnl } from "./pnlTracker.js";
 import { accrueEstimatedRewards } from "./rewardTracker.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 
+const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
+
 export type LiveAction = {
   kind: "place" | "cancel" | "skip" | "parity";
   message: string;
@@ -383,7 +385,87 @@ function findMarketForPosition(
   return [...marketByAppId.values()].find((market) => market.id === position.marketId);
 }
 
+function trackedOutcomeAgeSeconds(state: AlphaBotState, marketId: string, outcome: AlphaOutcome, now = Date.now()): number | undefined {
+  const timestamps: number[] = [];
+  for (const order of state.openOrders) {
+    if (order.runMode !== "live" || order.marketId !== marketId || order.outcome !== outcome || order.side !== "bid") continue;
+    const created = Date.parse(order.createdAt);
+    if (Number.isFinite(created)) timestamps.push(created);
+  }
+  for (const fill of state.fills) {
+    if (fill.runMode !== "live" || fill.marketId !== marketId || fill.outcome !== outcome || fill.side !== "bid") continue;
+    const when = Date.parse(fill.updatedAt ?? fill.createdAt);
+    if (Number.isFinite(when)) timestamps.push(when);
+  }
+  if (timestamps.length === 0) return undefined;
+  return Math.max(0, (now - Math.min(...timestamps)) / 1000);
+}
+
+function expectedLossUsd(averageCost: number, ask: number, shares: number): number {
+  return Math.max(0, (averageCost - ask) * shares);
+}
+
+function controlledUnderwaterMarketLossUsd(state: AlphaBotState, marketId: string, ignoreEscrowAppId?: number): number {
+  return state.openOrders
+    .filter(
+      (order) =>
+        order.runMode === "live" &&
+        order.status === "open" &&
+        order.marketId === marketId &&
+        order.source === "inventory_exit" &&
+        order.side === "ask" &&
+        order.reason.startsWith(CONTROLLED_UNDERWATER_EXIT_REASON) &&
+        order.liveEscrowAppId !== ignoreEscrowAppId,
+    )
+    .reduce((sum, order) => {
+      const position = state.positionsByMarket[order.marketId];
+      const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
+      if (averageCost === undefined || averageCost <= 0) return sum;
+      return sum + expectedLossUsd(averageCost, order.price, order.remainingShares);
+    }, 0);
+}
+
+function controlledUnderwaterExitStatus(
+  state: AlphaBotState,
+  marketId: string,
+  outcome: AlphaOutcome,
+  ask: number,
+  shares: number,
+  config: AlphaConfig,
+  ignoreEscrowAppId?: number,
+): { allowed: boolean; reason: string } {
+  const position = state.positionsByMarket[marketId];
+  const averageCost = outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
+  if (averageCost === undefined || averageCost <= 0) return { allowed: false, reason: "tracked cost basis unavailable" };
+  if (!config.underwaterExitEnabled) return { allowed: false, reason: "underwater exits disabled" };
+  const ageSeconds = trackedOutcomeAgeSeconds(state, marketId, outcome);
+  if ((ageSeconds ?? 0) < config.underwaterExitMinAgeHours * 3600) {
+    return {
+      allowed: false,
+      reason: `underwater grace period ${((ageSeconds ?? 0) / 3600).toFixed(1)}/${config.underwaterExitMinAgeHours.toFixed(1)}h`,
+    };
+  }
+  const lossCents = Math.max(0, (averageCost - ask) * 100);
+  if (lossCents > config.underwaterExitMaxLossCents) {
+    return { allowed: false, reason: `loss ${lossCents.toFixed(2)}c exceeds cap ${config.underwaterExitMaxLossCents.toFixed(2)}c` };
+  }
+  const notional = ask * shares;
+  if (notional > config.underwaterExitMaxNotionalUsd) {
+    return { allowed: false, reason: `notional $${notional.toFixed(2)} exceeds cap $${config.underwaterExitMaxNotionalUsd.toFixed(2)}` };
+  }
+  const marketLossUsed = controlledUnderwaterMarketLossUsd(state, marketId, ignoreEscrowAppId);
+  const projectedLoss = expectedLossUsd(averageCost, ask, shares);
+  if (marketLossUsed + projectedLoss > config.underwaterExitMaxMarketLossUsd) {
+    return {
+      allowed: false,
+      reason: `market loss cap $${config.underwaterExitMaxMarketLossUsd.toFixed(2)} would be exceeded`,
+    };
+  }
+  return { allowed: true, reason: `controlled underwater exit eligible; loss ${lossCents.toFixed(2)}c` };
+}
+
 function describeMissingExit(
+  state: AlphaBotState,
   position: AlphaBotState["positionsByMarket"][string],
   outcome: AlphaOutcome,
   market: AlphaMarket | undefined,
@@ -394,11 +476,25 @@ function describeMissingExit(
   if (!book) return "orderbook was not scanned for this market";
   const outcomeBook = getOutcomeBook(book, outcome);
   if (outcomeBook.mid === undefined) return "same-outcome midpoint unavailable";
+  const averageCost = outcome === "YES" ? position.avgYesCost : position.avgNoCost;
+  const minimumProfitableAsk = averageCost > 0 ? averageCost + config.spreadExitEdgeCents / 100 : undefined;
+  const shares = positionShareCount(position, outcome);
+  const costFloorReason = (ask: number) =>
+    minimumProfitableAsk !== undefined && ask < minimumProfitableAsk
+      ? (() => {
+          const status = controlledUnderwaterExitStatus(state, position.marketId, outcome, ask, shares, config);
+          return `target ask ${ask.toFixed(3)} below cost floor ${minimumProfitableAsk.toFixed(3)} (avg ${averageCost.toFixed(3)} + ${config.spreadExitEdgeCents.toFixed(
+            2,
+          )}c); ${status.reason}`;
+        })()
+      : undefined;
   const spreadMidpointAllowed = outcomeBook.mid >= config.minSpreadExitMidpoint && outcomeBook.mid <= config.maxSpreadMidpoint;
   const rewardMidpointAllowed = outcomeBook.mid >= config.minMidpoint && outcomeBook.mid <= config.maxMidpoint;
   if (market.reward.isRewardMarket && market.reward.maxRewardSpreadCents !== undefined && rewardMidpointAllowed) {
     const rewardAsk = outcomeBook.mid + config.rewardZoneBufferCents / 100;
     if (rewardAsk <= 0 || rewardAsk >= 1) return `reward-zone ask ${rewardAsk.toFixed(3)} outside valid price range`;
+    const costReason = costFloorReason(rewardAsk);
+    if (costReason) return costReason;
     return "reward-zone exit looked possible but no quote was produced";
   }
   if (!spreadMidpointAllowed) {
@@ -412,10 +508,11 @@ function describeMissingExit(
   }
   const edge = Math.min(config.spreadExitEdgeCents / 100, outcomeBook.spread / 4);
   const ask = Math.max(outcomeBook.mid + edge, outcomeBook.bid + 0.000001);
+  const costReason = costFloorReason(ask);
+  if (costReason) return costReason;
   if (ask <= outcomeBook.bid || ask >= outcomeBook.ask) {
     return `no room for exit ask inside spread: bid ${outcomeBook.bid.toFixed(3)}, ask ${outcomeBook.ask.toFixed(3)}, target ${ask.toFixed(3)}`;
   }
-  const shares = positionShareCount(position, outcome);
   return `exit looked possible for ${shares.toFixed(6)} share(s) but no quote was produced`;
 }
 
@@ -440,6 +537,20 @@ function exitOrderWouldLoseMoney(order: AlphaPaperOrder, state: AlphaBotState, c
   const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
   if (averageCost === undefined || averageCost <= 0) return false;
   return order.price < averageCost + config.spreadExitEdgeCents / 100;
+}
+
+function controlledUnderwaterExitAllowed(order: AlphaPaperOrder, state: AlphaBotState, config: AlphaConfig): boolean {
+  if (order.source !== "inventory_exit" || order.side !== "ask") return false;
+  const status = controlledUnderwaterExitStatus(
+    state,
+    order.marketId,
+    order.outcome,
+    order.price,
+    order.remainingShares,
+    config,
+    order.liveEscrowAppId,
+  );
+  return status.allowed;
 }
 
 function addInventoryExitDiagnostics(
@@ -477,7 +588,14 @@ function addInventoryExitDiagnostics(
       }
       actions.push({
         kind: "skip",
-        message: `Exit audit: no ${position.title} ${outcome} exit for ${shares.toFixed(6)} share(s): ${describeMissingExit(position, outcome, market, book, config)}`,
+        message: `Exit audit: no ${position.title} ${outcome} exit for ${shares.toFixed(6)} share(s): ${describeMissingExit(
+          state,
+          position,
+          outcome,
+          market,
+          book,
+          config,
+        )}`,
       });
     }
   }
@@ -719,6 +837,13 @@ export async function runLiveTick(
       });
     }
     if (exitOrderWouldLoseMoney(order, state, config)) {
+      if (controlledUnderwaterExitAllowed(order, state, config)) {
+        actions.push({
+          kind: "skip",
+          message: `Kept controlled underwater exit escrowAppId=${escrowAppId}; within configured loss limits`,
+        });
+        continue;
+      }
       actions.push({
         kind: "skip",
         message: `Inventory exit escrowAppId=${escrowAppId} is below tracked cost plus ${config.spreadExitEdgeCents.toFixed(2)}c; allowing cancellation`,

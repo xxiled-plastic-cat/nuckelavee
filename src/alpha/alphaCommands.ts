@@ -313,6 +313,9 @@ function buildTickDigestMessage(result: {
     `exit_notional=${formatUsd(exposure.exitNotionalUsd)} reward_eligible_exit_notional=${formatUsd(
       exposure.rewardEligibleExitNotionalUsd,
     )} exits_not_counted_as_exposure=true`,
+    `controlled_exit_notional=${formatUsd(exposure.controlledExitNotionalUsd)} underwater_inventory_notional=${formatUsd(
+      exposure.underwaterInventoryNotionalUsd,
+    )} underwater_inventory_unrealised_loss=${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`,
     `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)} realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
     `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day potential_reward_rate=${formatRewardUsd(
@@ -381,6 +384,9 @@ function buildDailySummaryMessage(
     `exit_notional=${formatUsd(exposure.exitNotionalUsd)}`,
     `reward_eligible_exit_notional=${formatUsd(exposure.rewardEligibleExitNotionalUsd)}`,
     `exits_not_counted_as_exposure=true`,
+    `controlled_exit_notional=${formatUsd(exposure.controlledExitNotionalUsd)}`,
+    `underwater_inventory_notional=${formatUsd(exposure.underwaterInventoryNotionalUsd)}`,
+    `underwater_inventory_unrealised_loss=${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`,
     `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
     `realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `trading_pnl=${formatUsd(state.totalPnl)}`,

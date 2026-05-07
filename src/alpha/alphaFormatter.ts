@@ -259,8 +259,11 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   spreadBidOrders: number;
   spreadBidExposureUsd: number;
   exitNotionalUsd: number;
+  controlledExitNotionalUsd: number;
   exitPnlIfFilledUsd: number;
   realisedPlusOpenExitPnlUsd: number;
+  underwaterInventoryNotionalUsd: number;
+  underwaterInventoryUnrealisedLossUsd: number;
   rewardEligibleExitOrders: number;
   rewardEligibleExitNotionalUsd: number;
   activeRewardBidOrders: number;
@@ -275,6 +278,7 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   const rewardEligibleBids = bids.filter((order) => order.rewardEligible);
   const spreadBids = bids.filter((order) => order.source === "spread");
   const exits = open.filter((order) => order.side === "ask" || order.source === "inventory_exit");
+  const controlledExits = exits.filter((order) => order.reason.startsWith("controlled underwater exit"));
   const rewardEligibleExits = exits.filter((order) => order.rewardEligible);
   const bidExposure = (orders: typeof bids) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
   const exitNotional = (orders: typeof exits) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
@@ -303,6 +307,7 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     orders.reduce((sum, order) => sum + (order.estimatedRewardUsdPerDay ?? 0) * rewardShare, 0);
   const activeRewardRateDailyUsd = rewardRateDaily(activeRewardBids);
   const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleBids);
+  const underwaterPositions = Object.values(state.positionsByMarket).filter((position) => position.unrealisedPnl < 0);
 
   return {
     openOrders: open.length,
@@ -316,8 +321,14 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     spreadBidOrders: spreadBids.length,
     spreadBidExposureUsd: bidExposure(spreadBids),
     exitNotionalUsd: exitNotional(exits),
+    controlledExitNotionalUsd: exitNotional(controlledExits),
     exitPnlIfFilledUsd,
     realisedPlusOpenExitPnlUsd: state.realisedPnl + exitPnlIfFilledUsd,
+    underwaterInventoryNotionalUsd: underwaterPositions.reduce(
+      (sum, position) => sum + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost,
+      0,
+    ),
+    underwaterInventoryUnrealisedLossUsd: underwaterPositions.reduce((sum, position) => sum + Math.abs(position.unrealisedPnl), 0),
     rewardEligibleExitOrders: rewardEligibleExits.length,
     rewardEligibleExitNotionalUsd: exitNotional(rewardEligibleExits),
     activeRewardBidOrders: activeRewardBids.length,
@@ -342,8 +353,11 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
   console.log(`  rewardEligibleBidExposure: ${fmtUsd(exposure.rewardEligibleBidExposureUsd)} (${exposure.rewardEligibleBidOrders} order(s))`);
   console.log(`  spreadBidExposure: ${fmtUsd(exposure.spreadBidExposureUsd)} (${exposure.spreadBidOrders} order(s))`);
   console.log(`  exitNotional: ${fmtUsd(exposure.exitNotionalUsd)} (${exposure.exitOrders} order(s), not counted as exposure)`);
+  console.log(`  controlledExitNotional: ${fmtUsd(exposure.controlledExitNotionalUsd)} (subset of exit notional)`);
   console.log(`  exitPnlIfFilled: ${fmtUsd(exposure.exitPnlIfFilledUsd)}`);
   console.log(`  realisedPlusOpenExitPnl: ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`);
+  console.log(`  underwaterInventoryNotional: ${fmtUsd(exposure.underwaterInventoryNotionalUsd)}`);
+  console.log(`  underwaterInventoryUnrealisedLoss: ${fmtUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`);
   console.log(
     `  rewardEligibleExitNotional: ${fmtUsd(exposure.rewardEligibleExitNotionalUsd)} (${exposure.rewardEligibleExitOrders} order(s), not counted as exposure)`,
   );

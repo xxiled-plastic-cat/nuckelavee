@@ -2,6 +2,8 @@ import type { AlphaConfig } from "./alphaConfig.js";
 import { roundShares } from "./alphaClient.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaQuote } from "./alphaTypes.js";
 
+const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
+
 function getOutcomeBook(book: AlphaOrderbook, outcome: AlphaOutcome): { bid?: number; ask?: number; mid?: number; spread?: number } {
   return outcome === "YES"
     ? { bid: book.yesBid, ask: book.yesAsk, mid: book.yesMid, spread: book.yesSpread }
@@ -41,6 +43,45 @@ function positionAverageCost(state: AlphaBotState, marketId: string, outcome: Al
   if (!position) return undefined;
   const averageCost = outcome === "YES" ? position.avgYesCost : position.avgNoCost;
   return averageCost > 0 ? averageCost : undefined;
+}
+
+function outcomeAgeSeconds(state: AlphaBotState, marketId: string, outcome: AlphaOutcome, now = Date.now()): number | undefined {
+  const timestamps: number[] = [];
+  for (const order of state.openOrders) {
+    if (order.runMode !== "live" || order.marketId !== marketId || order.outcome !== outcome || order.side !== "bid") continue;
+    const created = Date.parse(order.createdAt);
+    if (Number.isFinite(created)) timestamps.push(created);
+  }
+  for (const fill of state.fills) {
+    if (fill.runMode !== "live" || fill.marketId !== marketId || fill.outcome !== outcome || fill.side !== "bid") continue;
+    const when = Date.parse(fill.updatedAt ?? fill.createdAt);
+    if (Number.isFinite(when)) timestamps.push(when);
+  }
+  if (timestamps.length === 0) return undefined;
+  return Math.max(0, (now - Math.min(...timestamps)) / 1000);
+}
+
+function expectedLossUsd(averageCost: number, ask: number, shares: number): number {
+  return Math.max(0, (averageCost - ask) * shares);
+}
+
+function existingControlledMarketLossUsd(state: AlphaBotState, marketId: string): number {
+  return state.openOrders
+    .filter(
+      (order) =>
+        order.runMode === "live" &&
+        order.status === "open" &&
+        order.marketId === marketId &&
+        order.source === "inventory_exit" &&
+        order.side === "ask" &&
+        order.reason.startsWith(CONTROLLED_UNDERWATER_EXIT_REASON),
+    )
+    .reduce((sum, order) => {
+      const position = state.positionsByMarket[order.marketId];
+      const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
+      if (averageCost === undefined || averageCost <= 0) return sum;
+      return sum + expectedLossUsd(averageCost, order.price, order.remainingShares);
+    }, 0);
 }
 
 function insideSpreadBid(book: { bid?: number; ask?: number; mid?: number; spread?: number }, config: AlphaConfig): number | undefined {
@@ -164,6 +205,7 @@ export function generateQuotes(
     if (inventory <= 0) continue;
     if (!exitsEnabled) continue;
     const averageCost = positionAverageCost(state, market.id, outcome);
+    const positionAgeSeconds = outcomeAgeSeconds(state, market.id, outcome);
     let ask =
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
@@ -173,21 +215,36 @@ export function generateQuotes(
     if (ask !== undefined && outcomeBook.bid !== undefined && ask <= outcomeBook.bid) {
       ask = outcomeBook.bid + 0.01;
     }
+    let controlledUnderwaterExit = false;
     if (ask !== undefined && averageCost !== undefined) {
       const minimumProfitableAsk = averageCost + config.spreadExitEdgeCents / 100;
-      if (ask < minimumProfitableAsk) continue;
+      if (ask < minimumProfitableAsk) {
+        if (!config.underwaterExitEnabled) continue;
+        if ((positionAgeSeconds ?? 0) < config.underwaterExitMinAgeHours * 3600) continue;
+        const maxLossAsk = Math.max(0.000001, averageCost - config.underwaterExitMaxLossCents / 100);
+        ask = Math.max(ask, maxLossAsk);
+        controlledUnderwaterExit = ask < minimumProfitableAsk;
+      }
     }
     if (ask !== undefined && ask > 0 && ask < 1) {
-      const exitNotionalUsd = laneNotionalUsd(
+      let exitNotionalUsd = laneNotionalUsd(
         config.spreadTargetOrderSizeUsd,
         config.spreadMinOrderSizeUsd,
         config.spreadMaxOrderSizeUsd,
         false,
       );
+      if (controlledUnderwaterExit) {
+        exitNotionalUsd = Math.min(exitNotionalUsd ?? config.underwaterExitMaxNotionalUsd, config.underwaterExitMaxNotionalUsd);
+      }
       const sized = exitNotionalUsd === undefined ? undefined : quoteSize(ask, exitNotionalUsd);
       if (sized) {
         const sizeShares = Math.min(sized.sizeShares, roundShares(inventory));
         if (sizeShares > 0) {
+          if (controlledUnderwaterExit && averageCost !== undefined) {
+            const marketLossUsed = existingControlledMarketLossUsd(state, market.id);
+            const quoteLoss = expectedLossUsd(averageCost, ask, sizeShares);
+            if (marketLossUsed + quoteLoss > config.underwaterExitMaxMarketLossUsd) continue;
+          }
           const rewardEligible =
             market.reward.isRewardMarket &&
             rewardSpread !== undefined &&
@@ -203,7 +260,12 @@ export function generateQuotes(
             price: ask,
             sizeShares,
             notionalUsd: ask * sizeShares,
-            reason: "inventory exit ask",
+            reason:
+              controlledUnderwaterExit && averageCost !== undefined
+                ? `${CONTROLLED_UNDERWATER_EXIT_REASON}; age=${((positionAgeSeconds ?? 0) / 3600).toFixed(1)}h loss=${(
+                    (averageCost - ask) * 100
+                  ).toFixed(2)}c`
+                : "inventory exit ask",
             rewardEligible,
             rewardZoneDistanceCents: rewardSpread !== undefined ? Math.abs(midpoint - ask) * 100 : undefined,
             rewardMinContracts,

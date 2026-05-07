@@ -57,6 +57,11 @@ export type AlphaConfig = {
   spreadEntryMinDwellSeconds: number;
   spreadExitEdgeCents: number;
   spreadExitMinDwellSeconds: number;
+  underwaterExitEnabled: boolean;
+  underwaterExitMinAgeHours: number;
+  underwaterExitMaxLossCents: number;
+  underwaterExitMaxNotionalUsd: number;
+  underwaterExitMaxMarketLossUsd: number;
   maxSpreadMidpoint: number;
   spreadMaxMarketExposureUsd: number;
   spreadMaxTotalExposureUsd: number;
@@ -176,6 +181,11 @@ export function readAlphaConfig(): AlphaConfig {
     spreadEntryMinDwellSeconds: readInt("ALPHA_SPREAD_ENTRY_MIN_DWELL_SECONDS", 600),
     spreadExitEdgeCents: readNumber("ALPHA_SPREAD_EXIT_EDGE_CENTS", 1),
     spreadExitMinDwellSeconds: readInt("ALPHA_SPREAD_EXIT_MIN_DWELL_SECONDS", 1_800),
+    underwaterExitEnabled: readBool("ALPHA_UNDERWATER_EXIT_ENABLED", true),
+    underwaterExitMinAgeHours: readNumber("ALPHA_UNDERWATER_EXIT_MIN_AGE_HOURS", 24),
+    underwaterExitMaxLossCents: readNumber("ALPHA_UNDERWATER_EXIT_MAX_LOSS_CENTS", 2),
+    underwaterExitMaxNotionalUsd: readNumber("ALPHA_UNDERWATER_EXIT_MAX_NOTIONAL_USD", 1),
+    underwaterExitMaxMarketLossUsd: readNumber("ALPHA_UNDERWATER_EXIT_MAX_MARKET_LOSS_USD", 1),
     maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),
     spreadMaxMarketExposureUsd: readNumber(
       "ALPHA_SPREAD_MAX_MARKET_EXPOSURE_USD",

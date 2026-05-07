@@ -9,12 +9,16 @@ export type AlphaScanResult = {
   rewardError?: string;
 };
 
+function isLiveMarket(market: AlphaMarket): boolean {
+  return !market.resolved && market.status === "live";
+}
+
 export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig): Promise<AlphaScanResult> {
-  const markets = await client.getLiveMarkets();
+  const markets = (await client.getLiveMarkets()).filter(isLiveMarket);
   let rewardMarkets: AlphaMarket[] = [];
   let rewardError: string | undefined;
   try {
-    rewardMarkets = await client.getRewardMarkets();
+    rewardMarkets = (await client.getRewardMarkets()).filter(isLiveMarket);
   } catch (error) {
     rewardError = error instanceof Error ? error.message : String(error);
   }

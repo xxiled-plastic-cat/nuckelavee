@@ -19,6 +19,11 @@ type AlphaRuntimeClient = AlphaClient & {
   splitShares?: (input: { marketAppId: number; amount: number }) => Promise<{ txIds?: string[]; confirmedRound?: number }>;
 };
 
+type MarketChainStatus = {
+  isResolved?: boolean;
+  isActivated?: boolean;
+};
+
 export function fromMicroUnits(value: number | null | undefined): number | undefined {
   if (value === null || value === undefined || !Number.isFinite(value)) return undefined;
   return value / MICRO;
@@ -93,6 +98,31 @@ function toMarketStatus(market: Market): string {
   if (market.isResolved) return "resolved";
   if (market.isLive === false) return "closed";
   return "live";
+}
+
+function emptyOrderbook(market: AlphaMarket, source: AlphaOrderbook["source"], raw: unknown): AlphaOrderbook {
+  return {
+    marketId: market.id,
+    marketAppId: market.marketAppId,
+    slug: market.slug,
+    source,
+    yesSideOrders: { bids: [], asks: [] },
+    noSideOrders: { bids: [], asks: [] },
+    raw,
+  };
+}
+
+function decodeGlobalKey(rawKey: unknown): string {
+  if (typeof rawKey === "string") return Buffer.from(rawKey, "base64").toString();
+  if (rawKey instanceof Uint8Array) return Buffer.from(rawKey).toString();
+  return String(rawKey);
+}
+
+function decodeGlobalUint(rawValue: unknown): number | undefined {
+  if (!rawValue || typeof rawValue !== "object") return undefined;
+  const value = rawValue as { uint?: number | bigint; type?: number };
+  if (value.uint === undefined) return undefined;
+  return Number(value.uint);
 }
 
 function flattenMarket(market: Market): AlphaMarket[] {
@@ -192,8 +222,33 @@ export class AlphaSdkClient {
     return markets.find((market) => market.id === marketIdOrSlug || market.slug === marketIdOrSlug || String(market.marketAppId) === marketIdOrSlug);
   }
 
+  private async getMarketChainStatus(marketAppId: number): Promise<MarketChainStatus> {
+    try {
+      const app = (await this.algodClient.getApplicationByID(marketAppId).do()) as {
+        params?: {
+          globalState?: Array<{ key: unknown; value: unknown }>;
+          "global-state"?: Array<{ key: unknown; value: unknown }>;
+        };
+      };
+      const globalState = app.params?.globalState ?? app.params?.["global-state"] ?? [];
+      const status: MarketChainStatus = {};
+      for (const entry of globalState) {
+        const key = decodeGlobalKey(entry.key);
+        if (key === "is_resolved") status.isResolved = decodeGlobalUint(entry.value) === 1;
+        if (key === "is_activated") status.isActivated = decodeGlobalUint(entry.value) === 1;
+      }
+      return status;
+    } catch {
+      return {};
+    }
+  }
+
   async getOrderbook(market: AlphaMarket): Promise<AlphaOrderbook> {
     try {
+      const chainStatus = await this.getMarketChainStatus(market.marketAppId);
+      if (chainStatus.isResolved || chainStatus.isActivated === false) {
+        return emptyOrderbook(market, "unavailable", { reason: "market is not live on-chain", chainStatus });
+      }
       const book = await this.client.getOrderbook(market.marketAppId);
       const yesBids = normalizeLevels(book.yes.bids);
       const yesAsks = normalizeLevels(book.yes.asks);
@@ -224,15 +279,7 @@ export class AlphaSdkClient {
         raw: book,
       };
     } catch (error) {
-      return {
-        marketId: market.id,
-        marketAppId: market.marketAppId,
-        slug: market.slug,
-        source: "unavailable",
-        yesSideOrders: { bids: [], asks: [] },
-        noSideOrders: { bids: [], asks: [] },
-        raw: error,
-      };
+      return emptyOrderbook(market, "unavailable", error);
     }
   }
 
