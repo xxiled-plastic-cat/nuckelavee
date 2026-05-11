@@ -500,7 +500,6 @@ function describeMissingExit(
   if (!spreadMidpointAllowed) {
     return `midpoint ${outcomeBook.mid.toFixed(3)} outside spread exit bounds ${config.minSpreadExitMidpoint.toFixed(3)}-${config.maxSpreadMidpoint.toFixed(3)}`;
   }
-  if (!config.enableSpreadCapture) return "spread capture is disabled";
   if (outcomeBook.bid === undefined || outcomeBook.ask === undefined || outcomeBook.spread === undefined) {
     return `missing same-outcome book side(s): bid=${outcomeBook.bid?.toFixed(3) ?? "n/a"}, ask=${outcomeBook.ask?.toFixed(3) ?? "n/a"}, spread=${
       outcomeBook.spread !== undefined ? `${(outcomeBook.spread * 100).toFixed(2)}c` : "n/a"
@@ -856,11 +855,17 @@ export async function runLiveTick(
       continue;
     }
     if (order.source === "spread" && order.side === "bid" && orderAgeSeconds(order) < config.spreadEntryMinDwellSeconds) {
+      if (config.enableSpreadLane && config.enableSpreadCapture) {
+        actions.push({
+          kind: "skip",
+          message: `Kept spread entry escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}s/${config.spreadEntryMinDwellSeconds}s before reconsidering`,
+        });
+        continue;
+      }
       actions.push({
         kind: "skip",
-        message: `Kept spread entry escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}s/${config.spreadEntryMinDwellSeconds}s before reconsidering`,
+        message: `Spread lane disabled; allowing immediate cancellation of spread entry escrowAppId=${escrowAppId}`,
       });
-      continue;
     }
     if (mode === "live-dry-run") {
       actions.push({ kind: "cancel", message: `Would cancel live order escrowAppId=${escrowAppId}; ${reason}` });

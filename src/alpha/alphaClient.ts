@@ -5,6 +5,9 @@ import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaBookLevel, AlphaMarket, AlphaOrderbook, AlphaRewardInfo } from "./alphaTypes.js";
 
 const MICRO = 1_000_000;
+const ALPHA_API_HOST = "alphaarcade.com";
+const MAX_ERROR_BODY_LOG_CHARS = 800;
+let alphaApiDiagnosticsInstalled = false;
 
 type AlphaRuntimeClient = AlphaClient & {
   createMarketOrder?: (input: {
@@ -186,12 +189,64 @@ function normalizeLevels(entries: Array<{ price: number; quantity: number; escro
     .filter((entry) => entry.price > 0 && entry.price < 1 && entry.quantityShares > 0);
 }
 
+function shortError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function truncateText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
+}
+
+function looksLikeAlphaApiUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname.includes(ALPHA_API_HOST);
+  } catch {
+    return url.includes(ALPHA_API_HOST);
+  }
+}
+
+function installAlphaApiDiagnostics(): void {
+  if (alphaApiDiagnosticsInstalled) return;
+  if (typeof globalThis.fetch !== "function") return;
+  const originalFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+    const method = init?.method ?? (typeof input === "object" && "method" in input ? input.method : "GET");
+    const isAlphaApi = looksLikeAlphaApiUrl(url);
+
+    try {
+      const response = await originalFetch(input, init);
+      if (isAlphaApi && !response.ok) {
+        let bodyPreview = "";
+        try {
+          const responseBody = await response.clone().text();
+          bodyPreview = responseBody ? truncateText(responseBody, MAX_ERROR_BODY_LOG_CHARS) : "<empty body>";
+        } catch {
+          bodyPreview = "<failed to read response body>";
+        }
+        console.error(
+          `[alpha-api] ${method} ${url} -> ${response.status} ${response.statusText} | body=${bodyPreview}`,
+        );
+      }
+      return response;
+    } catch (error) {
+      if (isAlphaApi) {
+        console.error(`[alpha-api] ${method} ${url} -> request failed: ${shortError(error)}`);
+      }
+      throw error;
+    }
+  }) as typeof globalThis.fetch;
+  alphaApiDiagnosticsInstalled = true;
+}
+
 export class AlphaSdkClient {
   private readonly client: AlphaClient;
   private readonly algodClient: algosdk.Algodv2;
   private readonly usdcAssetId: number;
 
   constructor(config: AlphaConfig, liveSigner: boolean) {
+    installAlphaApiDiagnostics();
     const account =
       liveSigner && config.walletMnemonic ? algosdk.mnemonicToSecretKey(config.walletMnemonic) : algosdk.generateAccount();
     this.algodClient = new algosdk.Algodv2(config.algodToken ?? "", config.algodServer, "");
@@ -208,13 +263,21 @@ export class AlphaSdkClient {
   }
 
   async getLiveMarkets(): Promise<AlphaMarket[]> {
-    const markets = await this.client.getLiveMarkets();
-    return markets.flatMap(flattenMarket);
+    try {
+      const markets = await this.client.getLiveMarkets();
+      return markets.flatMap(flattenMarket);
+    } catch (error) {
+      throw new Error(`Failed to fetch live markets from Alpha API: ${shortError(error)}`);
+    }
   }
 
   async getRewardMarkets(): Promise<AlphaMarket[]> {
-    const markets = await this.client.getRewardMarkets();
-    return markets.flatMap(flattenMarket).filter((market) => market.reward.isRewardMarket);
+    try {
+      const markets = await this.client.getRewardMarkets();
+      return markets.flatMap(flattenMarket).filter((market) => market.reward.isRewardMarket);
+    } catch (error) {
+      throw new Error(`Failed to fetch reward markets from Alpha API: ${shortError(error)}`);
+    }
   }
 
   async getMarket(marketIdOrSlug: string): Promise<AlphaMarket | undefined> {
@@ -292,7 +355,11 @@ export class AlphaSdkClient {
   }
 
   async getWalletOpenOrders(walletAddress: string): Promise<OpenOrder[]> {
-    return this.client.getWalletOrdersFromApi(walletAddress);
+    try {
+      return this.client.getWalletOrdersFromApi(walletAddress);
+    } catch (error) {
+      throw new Error(`Failed to fetch wallet open orders from Alpha API for ${walletAddress}: ${shortError(error)}`);
+    }
   }
 
   async getUsdcBalance(walletAddress: string): Promise<number | undefined> {

@@ -95,8 +95,18 @@ function insideSpreadBid(book: { bid?: number; ask?: number; mid?: number; sprea
   return bid;
 }
 
-function insideSpreadAsk(book: { bid?: number; ask?: number; mid?: number; spread?: number }, config: AlphaConfig): number | undefined {
-  if (!config.enableSpreadCapture || book.bid === undefined || book.ask === undefined || book.mid === undefined || book.spread === undefined) {
+function insideSpreadAsk(
+  book: { bid?: number; ask?: number; mid?: number; spread?: number },
+  config: AlphaConfig,
+  options: { requireSpreadCapture: boolean } = { requireSpreadCapture: true },
+): number | undefined {
+  if (
+    (options.requireSpreadCapture && !config.enableSpreadCapture) ||
+    book.bid === undefined ||
+    book.ask === undefined ||
+    book.mid === undefined ||
+    book.spread === undefined
+  ) {
     return undefined;
   }
   const edge = Math.min(config.spreadExitEdgeCents / 100, book.spread / 4);
@@ -210,7 +220,7 @@ export function generateQuotes(
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
         : spreadExitMidpointAllowed
-          ? insideSpreadAsk(outcomeBook, config)
+          ? insideSpreadAsk(outcomeBook, config, { requireSpreadCapture: false })
           : undefined;
     if (ask !== undefined && outcomeBook.bid !== undefined && ask <= outcomeBook.bid) {
       ask = outcomeBook.bid + 0.01;
