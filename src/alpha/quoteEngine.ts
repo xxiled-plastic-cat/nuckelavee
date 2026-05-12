@@ -100,14 +100,14 @@ function insideSpreadAsk(
   config: AlphaConfig,
   options: { requireSpreadCapture: boolean } = { requireSpreadCapture: true },
 ): number | undefined {
-  if (
-    (options.requireSpreadCapture && !config.enableSpreadCapture) ||
-    book.bid === undefined ||
-    book.ask === undefined ||
-    book.mid === undefined ||
-    book.spread === undefined
-  ) {
+  if ((options.requireSpreadCapture && !config.enableSpreadCapture) || book.bid === undefined || book.mid === undefined) {
     return undefined;
+  }
+  // When there is no visible ask side, still post an unwind ask above best bid
+  // so inventory can start offloading instead of waiting for a full two-sided book.
+  if (book.ask === undefined || book.spread === undefined) {
+    const syntheticAsk = Math.min(0.999999, Math.max(book.mid + config.spreadExitEdgeCents / 100, book.bid + 0.000001));
+    return syntheticAsk > book.bid ? syntheticAsk : undefined;
   }
   const edge = Math.min(config.spreadExitEdgeCents / 100, book.spread / 4);
   const ask = Math.max(book.mid + edge, book.bid + 0.000001);

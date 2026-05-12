@@ -500,8 +500,8 @@ function describeMissingExit(
   if (!spreadMidpointAllowed) {
     return `midpoint ${outcomeBook.mid.toFixed(3)} outside spread exit bounds ${config.minSpreadExitMidpoint.toFixed(3)}-${config.maxSpreadMidpoint.toFixed(3)}`;
   }
-  if (outcomeBook.bid === undefined || outcomeBook.ask === undefined || outcomeBook.spread === undefined) {
-    return `missing same-outcome book side(s): bid=${outcomeBook.bid?.toFixed(3) ?? "n/a"}, ask=${outcomeBook.ask?.toFixed(3) ?? "n/a"}, spread=${
+  if (outcomeBook.bid === undefined) {
+    return `missing same-outcome bid side; ask=${outcomeBook.ask?.toFixed(3) ?? "n/a"}, spread=${
       outcomeBook.spread !== undefined ? `${(outcomeBook.spread * 100).toFixed(2)}c` : "n/a"
     }`;
   }
