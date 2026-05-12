@@ -505,11 +505,14 @@ function describeMissingExit(
       outcomeBook.spread !== undefined ? `${(outcomeBook.spread * 100).toFixed(2)}c` : "n/a"
     }`;
   }
-  const edge = Math.min(config.spreadExitEdgeCents / 100, outcomeBook.spread / 4);
+  const edge =
+    outcomeBook.spread !== undefined
+      ? Math.min(config.spreadExitEdgeCents / 100, outcomeBook.spread / 4)
+      : config.spreadExitEdgeCents / 100;
   const ask = Math.max(outcomeBook.mid + edge, outcomeBook.bid + 0.000001);
   const costReason = costFloorReason(ask);
   if (costReason) return costReason;
-  if (ask <= outcomeBook.bid || ask >= outcomeBook.ask) {
+  if (outcomeBook.ask !== undefined && (ask <= outcomeBook.bid || ask >= outcomeBook.ask)) {
     return `no room for exit ask inside spread: bid ${outcomeBook.bid.toFixed(3)}, ask ${outcomeBook.ask.toFixed(3)}, target ${ask.toFixed(3)}`;
   }
   return `exit looked possible for ${shares.toFixed(6)} share(s) but no quote was produced`;
