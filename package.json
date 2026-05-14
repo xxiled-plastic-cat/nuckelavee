@@ -24,6 +24,11 @@
     "alpha:cron:live-dry-run": "ALPHA_CRON_COMMAND=\"npm run alpha:live-dry-run\" tsx src/alpha/alphaCron.ts",
     "alpha:cron:live": "ALPHA_CRON_COMMAND=\"npm run alpha:live\" tsx src/alpha/alphaCron.ts",
     "alpha:cron:live:once": "ALPHA_CRON_COMMAND=\"npm run alpha:live\" tsx src/alpha/alphaCron.ts --once",
+    "alpha:dashboard:api": "tsx src/alpha/alphaDashboardServer.ts",
+    "alpha:dashboard:web": "npm --prefix apps/alpha-dashboard run dev",
+    "alpha:dashboard:web:build": "npm --prefix apps/alpha-dashboard run build",
+    "alpha:dashboard:web:typecheck": "npm --prefix apps/alpha-dashboard run typecheck",
+    "alpha:dashboard": "concurrently \"npm run alpha:dashboard:api\" \"npm run alpha:dashboard:web\"",
     "alpha:typecheck": "tsc --noEmit",
     "poly:scan": "tsx src/polymarket/polyCommands.ts scan",
     "poly:rewards": "tsx src/polymarket/polyCommands.ts rewards",
@@ -54,6 +59,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "concurrently": "^9.2.1",
     "drizzle-kit": "^0.31.10"
   }
 }

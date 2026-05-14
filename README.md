@@ -30,6 +30,37 @@ npm run alpha:live-dry-run
 npm run alpha:live
 ```
 
+Alpha dashboard (read-only):
+
+```bash
+# Install frontend deps once
+npm --prefix apps/alpha-dashboard install
+
+# Run API + dashboard together
+npm run alpha:dashboard
+
+# Or run independently
+npm run alpha:dashboard:api
+npm run alpha:dashboard:web
+```
+
+Dashboard defaults:
+
+- API: `http://127.0.0.1:8787`
+- Web UI: `http://127.0.0.1:5174`
+- Optional env:
+  - `ALPHA_DASHBOARD_PORT` (API port)
+  - `ALPHA_DASHBOARD_HOST` (API bind host)
+  - `ALPHA_DASHBOARD_WEB_PORT` (Vite dev port)
+  - `ALPHA_DASHBOARD_CACHE_MS` (API cache TTL, default 5000)
+
+Available endpoints:
+
+- `GET /api/alpha/dashboard?wallet=<optional_wallet_address>`
+- `GET /api/alpha/overview?wallet=<optional_wallet_address>`
+- `GET /api/alpha/positions?wallet=<optional_wallet_address>`
+- `GET /api/alpha/orders?wallet=<optional_wallet_address>`
+
 Cron runner:
 
 ```bash
