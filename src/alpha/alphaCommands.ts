@@ -22,18 +22,16 @@ import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
 import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
 import { closeDatabase } from "../db.js";
+import { isDebugModeEnabled } from "../utils/debugMode.js";
 
 dotenv.config();
 
 const DEFAULT_REWARD_HISTORY_RECEIVER = "65GJKPMEYLR2C2GHFIAUKF2CFDE6IXDB3LUTOVJ424LBMMEWJ6UXCHCBZQ";
 const DEFAULT_REWARD_HISTORY_SENDER = "LPCTQJDOFBG5J63LOUY6A6JMHHHXIVOIZ7FLN6FETFSSWQOJR56V65INTU";
 const MICRO = 1_000_000n;
-const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
-  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
-);
 
 function logStartupDebug(message: string): void {
-  if (!startupDebugEnabled) return;
+  if (!isDebugModeEnabled()) return;
   console.log(`[startup-debug ${new Date().toISOString()}] ${message}`);
 }
 

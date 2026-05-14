@@ -4,15 +4,13 @@ import { createServer } from "node:http";
 import cron from "node-cron";
 import dotenv from "dotenv";
 import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
+import { isDebugModeEnabled } from "../utils/debugMode.js";
 
 dotenv.config();
 
 const schedule = process.env.ALPHA_CRON_SCHEDULE || "*/2 * * * *";
 const command = process.env.ALPHA_CRON_COMMAND || "npm run alpha:live";
 const once = process.argv.includes("--once");
-const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
-  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
-);
 const healthPort = Number.parseInt(process.env.PORT || process.env.ALPHA_HEALTH_PORT || "", 10);
 const skipNoticeThrottleMinutes = readSkipNoticeThrottleMinutes();
 let running = false;
@@ -21,7 +19,7 @@ let lastTickEndedAt: string | undefined;
 let lastTickExitCode: number | undefined;
 
 function logStartupDebug(message: string): void {
-  if (!startupDebugEnabled) return;
+  if (!isDebugModeEnabled()) return;
   console.log(`[startup-debug ${new Date().toISOString()}] [cron] ${message}`);
 }
 

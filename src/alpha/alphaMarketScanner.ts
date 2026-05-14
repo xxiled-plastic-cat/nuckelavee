@@ -1,13 +1,10 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaMarket, AlphaOrderbook } from "./alphaTypes.js";
 import { AlphaSdkClient } from "./alphaClient.js";
-
-const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
-  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
-);
+import { isDebugModeEnabled } from "../utils/debugMode.js";
 
 function logStartupDebug(message: string): void {
-  if (!startupDebugEnabled) return;
+  if (!isDebugModeEnabled()) return;
   console.log(`[startup-debug ${new Date().toISOString()}] [scan] ${message}`);
 }
 
