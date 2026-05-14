@@ -9,6 +9,7 @@ export type AlphaConfig = {
   indexerServer: string;
   matcherAppId: number;
   usdcAssetId: number;
+  orderbookFetchConcurrency: number;
   scanOrderbookLimit: number;
   spreadScanOrderbookLimit: number;
   maxMarketsPerScan: number;
@@ -130,9 +131,10 @@ export function readAlphaConfig(): AlphaConfig {
     indexerServer: process.env.ALPHA_INDEXER_SERVER || "https://mainnet-idx.4160.nodely.io",
     matcherAppId: readInt("ALPHA_MATCHER_APP_ID", 3_078_581_851),
     usdcAssetId: readInt("ALPHA_USDC_ASSET_ID", 31_566_704),
+    orderbookFetchConcurrency: readInt("ALPHA_ORDERBOOK_FETCH_CONCURRENCY", 12),
     scanOrderbookLimit: readInt("ALPHA_SCAN_ORDERBOOK_LIMIT", 25),
     spreadScanOrderbookLimit: readInt("ALPHA_SPREAD_SCAN_ORDERBOOK_LIMIT", 75),
-    maxMarketsPerScan: readInt("ALPHA_MAX_MARKETS_PER_SCAN", 100),
+    maxMarketsPerScan: readInt("ALPHA_MAX_MARKETS_PER_SCAN", 0),
     scanIntervalMs: readInt("ALPHA_SCAN_INTERVAL_MS", 10_000),
     streamTimeoutMs: readInt("ALPHA_STREAM_TIMEOUT_MS", 15_000),
     rewardsRequireApiKey: readBool("ALPHA_REWARDS_REQUIRE_API_KEY", false),
