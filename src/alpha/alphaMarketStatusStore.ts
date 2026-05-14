@@ -128,18 +128,23 @@ export async function upsertAlphaMarketStatus(rows: AlphaMarketStatusUpsert[]): 
 export async function loadInactiveMarketAppIds(appIds: number[]): Promise<Set<number>> {
   if (appIds.length === 0) return new Set();
   const db = getDatabase();
-  const rows = await db
-    .select({ marketAppId: alphaMarketStatus.marketAppId })
-    .from(alphaMarketStatus)
-    .where(
-      and(
-        inArray(alphaMarketStatus.marketAppId, appIds),
-        or(
-          eq(alphaMarketStatus.isResolved, true),
-          eq(alphaMarketStatus.isClosed, true),
-          eq(alphaMarketStatus.isLive, false),
+  const inactiveMarketAppIds = new Set<number>();
+  for (let offset = 0; offset < appIds.length; offset += UPSERT_BATCH_SIZE) {
+    const batch = appIds.slice(offset, offset + UPSERT_BATCH_SIZE);
+    const rows = await db
+      .select({ marketAppId: alphaMarketStatus.marketAppId })
+      .from(alphaMarketStatus)
+      .where(
+        and(
+          inArray(alphaMarketStatus.marketAppId, batch),
+          or(
+            eq(alphaMarketStatus.isResolved, true),
+            eq(alphaMarketStatus.isClosed, true),
+            eq(alphaMarketStatus.isLive, false),
+          ),
         ),
-      ),
-    );
-  return new Set(rows.map((row) => row.marketAppId));
+      );
+    for (const row of rows) inactiveMarketAppIds.add(row.marketAppId);
+  }
+  return inactiveMarketAppIds;
 }
