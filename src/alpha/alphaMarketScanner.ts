@@ -2,6 +2,15 @@ import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaMarket, AlphaOrderbook } from "./alphaTypes.js";
 import { AlphaSdkClient } from "./alphaClient.js";
 
+const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
+  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
+);
+
+function logStartupDebug(message: string): void {
+  if (!startupDebugEnabled) return;
+  console.log(`[startup-debug ${new Date().toISOString()}] [scan] ${message}`);
+}
+
 export type AlphaScanResult = {
   markets: AlphaMarket[];
   rewardMarkets: AlphaMarket[];
@@ -14,13 +23,18 @@ function isLiveMarket(market: AlphaMarket): boolean {
 }
 
 export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig): Promise<AlphaScanResult> {
+  const startedAt = Date.now();
+  logStartupDebug(`loadAlphaScan start maxMarketsPerScan=${config.maxMarketsPerScan}`);
   const markets = (await client.getLiveMarkets()).filter(isLiveMarket);
+  logStartupDebug(`live markets fetched count=${markets.length}`);
   let rewardMarkets: AlphaMarket[] = [];
   let rewardError: string | undefined;
   try {
     rewardMarkets = (await client.getRewardMarkets()).filter(isLiveMarket);
+    logStartupDebug(`reward markets fetched count=${rewardMarkets.length}`);
   } catch (error) {
     rewardError = error instanceof Error ? error.message : String(error);
+    logStartupDebug(`reward markets fetch failed error=${rewardError}`);
   }
   const rewardByAppId = new Map<number, AlphaMarket>();
   for (const market of rewardMarkets) rewardByAppId.set(market.marketAppId, market);
@@ -36,9 +50,20 @@ export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig)
     marketsToScanByAppId.set(market.marketAppId, market);
   }
   const marketsToScan = [...marketsToScanByAppId.values()];
+  logStartupDebug(`markets selected for orderbook scan count=${marketsToScan.length}`);
   const books = await Promise.all(
-    marketsToScan.map(async (market) => [market.marketAppId, await client.getOrderbook(market)] as const),
+    marketsToScan.map(async (market, index) => {
+      if (index < 5 || index % 10 === 0) {
+        logStartupDebug(`orderbook fetch start idx=${index + 1}/${marketsToScan.length} appId=${market.marketAppId}`);
+      }
+      const book = await client.getOrderbook(market);
+      if (index < 5 || index % 10 === 0) {
+        logStartupDebug(`orderbook fetch done idx=${index + 1}/${marketsToScan.length} appId=${market.marketAppId}`);
+      }
+      return [market.marketAppId, book] as const;
+    }),
   );
+  logStartupDebug(`loadAlphaScan end elapsed_ms=${Date.now() - startedAt} orderbooks=${books.length}`);
   return {
     markets,
     rewardMarkets,

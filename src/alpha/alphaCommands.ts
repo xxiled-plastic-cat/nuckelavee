@@ -28,15 +28,36 @@ dotenv.config();
 const DEFAULT_REWARD_HISTORY_RECEIVER = "65GJKPMEYLR2C2GHFIAUKF2CFDE6IXDB3LUTOVJ424LBMMEWJ6UXCHCBZQ";
 const DEFAULT_REWARD_HISTORY_SENDER = "LPCTQJDOFBG5J63LOUY6A6JMHHHXIVOIZ7FLN6FETFSSWQOJR56V65INTU";
 const MICRO = 1_000_000n;
+const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
+  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
+);
+
+function logStartupDebug(message: string): void {
+  if (!startupDebugEnabled) return;
+  console.log(`[startup-debug ${new Date().toISOString()}] ${message}`);
+}
 
 async function buildScan(liveSigner = false) {
+  const startedAt = Date.now();
+  logStartupDebug(`buildScan start liveSigner=${liveSigner}`);
   const config = readAlphaConfig();
+  logStartupDebug(
+    `buildScan config loaded matcherAppId=${config.matcherAppId} usdcAssetId=${config.usdcAssetId} wallet=${config.walletAddress ?? "none"}`,
+  );
   const client = new AlphaSdkClient(config, liveSigner);
+  logStartupDebug(`buildScan client created liveSigner=${liveSigner}`);
   const scan = await loadAlphaScan(client, config);
+  logStartupDebug(
+    `buildScan scan loaded markets=${scan.markets.length} rewardMarkets=${scan.rewardMarkets.length} orderbooks=${scan.orderbooks.size} rewardError=${scan.rewardError ?? "none"}`,
+  );
   const uniqueMarkets = new Map([...scan.rewardMarkets, ...scan.markets].map((market) => [market.marketAppId, market]));
   const allMarkets = [...uniqueMarkets.values()];
+  logStartupDebug(`buildScan unique markets prepared count=${allMarkets.length}`);
   const rewardCandidates = rankRewardCandidates(allMarkets, scan.orderbooks, config);
+  logStartupDebug(`buildScan reward candidates ranked count=${rewardCandidates.length}`);
   const parity = scanParity(allMarkets, scan.orderbooks, config);
+  logStartupDebug(`buildScan parity scan complete opportunities=${parity.length}`);
+  logStartupDebug(`buildScan end elapsed_ms=${Date.now() - startedAt}`);
   return { config, client, scan, rewardCandidates, parity };
 }
 
@@ -401,8 +422,14 @@ function buildDailySummaryMessage(
 }
 
 async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
+  const startedAt = Date.now();
+  logStartupDebug(`runLiveCommand start mode=${mode}`);
   const { config, scan } = await buildScan(mode === "live");
+  logStartupDebug(
+    `runLiveCommand buildScan done mode=${mode} markets=${scan.markets.length} rewardMarkets=${scan.rewardMarkets.length}`,
+  );
   const result = await runLiveTick(scan, config, mode);
+  logStartupDebug(`runLiveCommand runLiveTick done mode=${mode} actions=${result.actions.length}`);
   const abortMessages = extractTickAbortMessages(result.actions);
   if (mode === "live" && abortMessages.length > 0) {
     const throttleMinutes = readSkipNoticeThrottleMinutes();
@@ -435,6 +462,7 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
   }
   if (result.actions.length === 0) console.log("No actions.");
   printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config);
+  logStartupDebug(`runLiveCommand end mode=${mode} elapsed_ms=${Date.now() - startedAt}`);
 }
 
 function printUsage(): void {
@@ -446,6 +474,9 @@ function printUsage(): void {
 
 async function main(): Promise<void> {
   const command = process.argv[2];
+  logStartupDebug(
+    `main start command=${command ?? "none"} pid=${process.pid} cwd=${process.cwd()} node=${process.version} args=${process.argv.slice(2).join(" ")}`,
+  );
   if (command === "scan") return runScanCommand();
   if (command === "rewards") return runRewardsCommand();
   if (command === "reward-history") return runRewardHistoryCommand(process.argv[3], process.argv[4]);
@@ -462,9 +493,11 @@ async function main(): Promise<void> {
 
 void main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
+  logStartupDebug(`main failed message=${message}`);
   console.error(message);
   process.exitCode = 1;
 }).finally(async () => {
+  logStartupDebug(`main finally command=${process.argv[2] ?? "none"} exitCode=${process.exitCode ?? 0}`);
   if (process.argv[2] !== "watch" && process.argv[2] !== "paper-watch") {
     await closeDatabase();
   }

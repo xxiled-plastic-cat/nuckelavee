@@ -10,6 +10,9 @@ dotenv.config();
 const schedule = process.env.ALPHA_CRON_SCHEDULE || "*/2 * * * *";
 const command = process.env.ALPHA_CRON_COMMAND || "npm run alpha:live";
 const once = process.argv.includes("--once");
+const startupDebugEnabled = ["1", "true", "yes", "on"].includes(
+  (process.env.ALPHA_DEBUG_STARTUP || process.env.NUCKELAVEE_DEBUG_STARTUP || "").toLowerCase(),
+);
 const healthPort = Number.parseInt(process.env.PORT || process.env.ALPHA_HEALTH_PORT || "", 10);
 const skipNoticeThrottleMinutes = readSkipNoticeThrottleMinutes();
 let running = false;
@@ -17,15 +20,32 @@ let lastTickStartedAt: string | undefined;
 let lastTickEndedAt: string | undefined;
 let lastTickExitCode: number | undefined;
 
+function logStartupDebug(message: string): void {
+  if (!startupDebugEnabled) return;
+  console.log(`[startup-debug ${new Date().toISOString()}] [cron] ${message}`);
+}
+
 function runTick(): Promise<number> {
   return new Promise((resolve) => {
+    const tickStarted = Date.now();
+    logStartupDebug(`runTick spawn start command="${command}" cwd=${process.cwd()}`);
     const child = spawn(command, {
       cwd: process.cwd(),
       stdio: "inherit",
       shell: true,
       env: process.env,
     });
-    child.on("close", (code) => resolve(code ?? 1));
+    logStartupDebug(`runTick child spawned pid=${child.pid ?? -1}`);
+    child.on("error", (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      logStartupDebug(`runTick child error message=${message}`);
+    });
+    child.on("close", (code, signal) => {
+      logStartupDebug(
+        `runTick child close code=${code ?? "null"} signal=${signal ?? "none"} elapsed_ms=${Date.now() - tickStarted}`,
+      );
+      resolve(code ?? 1);
+    });
   });
 }
 
@@ -58,9 +78,14 @@ function startHealthServer(): void {
 }
 
 async function main(): Promise<void> {
+  logStartupDebug(
+    `main start pid=${process.pid} cwd=${process.cwd()} schedule=${schedule} command="${command}" once=${once} port=${Number.isFinite(healthPort) ? healthPort : "none"}`,
+  );
   if (once) {
+    logStartupDebug("main running in --once mode");
     const code = await runTick();
     process.exitCode = code;
+    logStartupDebug(`main --once completed exitCode=${code}`);
     return;
   }
   if (!cron.validate(schedule)) {
@@ -84,10 +109,12 @@ async function main(): Promise<void> {
     }
     running = true;
     lastTickStartedAt = new Date().toISOString();
+    logStartupDebug(`tick scheduled start at=${lastTickStartedAt}`);
     console.log(`[${lastTickStartedAt}] cron tick start`);
     const exitCode = await runTick();
     lastTickEndedAt = new Date().toISOString();
     lastTickExitCode = exitCode;
+    logStartupDebug(`tick scheduled end at=${lastTickEndedAt} exitCode=${exitCode}`);
     console.log(`[${lastTickEndedAt}] cron tick end exit_code=${exitCode}`);
     if (exitCode !== 0) {
       await notifyTelegram(`ALERT: Nuckelavee cron tick failed\nat=${lastTickEndedAt}\nexit_code=${exitCode}`);
@@ -98,6 +125,7 @@ async function main(): Promise<void> {
 
 void main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
+  logStartupDebug(`main failed message=${message}`);
   console.error(message);
   process.exitCode = 1;
 });
