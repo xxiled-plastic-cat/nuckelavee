@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { DashboardSnapshot } from "./types";
 
-const REFRESH_INTERVAL_MS = 10_000;
+const REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 
 function fmtUsd(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "unknown";
