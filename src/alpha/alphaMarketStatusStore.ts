@@ -17,6 +17,21 @@ export type AlphaMarketStatusUpsert = {
   lastSeenAt: Date;
 };
 
+export type ResolvedAlphaMarket = {
+  marketAppId: number;
+  marketId: string | null;
+  slug: string | null;
+};
+
+export type KnownAlphaMarket = {
+  marketAppId: number;
+  marketId: string | null;
+  slug: string | null;
+  isResolved: boolean;
+  isLive: boolean;
+  isClosed: boolean;
+};
+
 const UPSERT_BATCH_SIZE = 200;
 
 function parseCloseTime(closeTime: string | undefined): Date | undefined {
@@ -147,4 +162,32 @@ export async function loadInactiveMarketAppIds(appIds: number[]): Promise<Set<nu
     for (const row of rows) inactiveMarketAppIds.add(row.marketAppId);
   }
   return inactiveMarketAppIds;
+}
+
+export async function loadResolvedAlphaMarkets(): Promise<ResolvedAlphaMarket[]> {
+  const db = getDatabase();
+  const rows = await db
+    .select({
+      marketAppId: alphaMarketStatus.marketAppId,
+      marketId: alphaMarketStatus.marketId,
+      slug: alphaMarketStatus.slug,
+    })
+    .from(alphaMarketStatus)
+    .where(eq(alphaMarketStatus.isResolved, true));
+  return rows;
+}
+
+export async function loadKnownAlphaMarkets(): Promise<KnownAlphaMarket[]> {
+  const db = getDatabase();
+  const rows = await db
+    .select({
+      marketAppId: alphaMarketStatus.marketAppId,
+      marketId: alphaMarketStatus.marketId,
+      slug: alphaMarketStatus.slug,
+      isResolved: alphaMarketStatus.isResolved,
+      isLive: alphaMarketStatus.isLive,
+      isClosed: alphaMarketStatus.isClosed,
+    })
+    .from(alphaMarketStatus);
+  return rows;
 }

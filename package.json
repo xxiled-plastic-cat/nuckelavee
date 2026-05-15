@@ -19,6 +19,7 @@
     "alpha:paper-report": "tsx src/alpha/alphaCommands.ts paper-report",
     "alpha:live-dry-run": "tsx src/alpha/alphaCommands.ts live-dry-run",
     "alpha:live": "tsx src/alpha/alphaCommands.ts live",
+    "alpha:resolved-asset-cleanup": "tsx src/alpha/alphaCommands.ts resolved-asset-cleanup",
     "alpha:cron": "tsx src/alpha/alphaCron.ts",
     "alpha:cron:paper": "ALPHA_CRON_COMMAND=\"npm run alpha:paper\" tsx src/alpha/alphaCron.ts",
     "alpha:cron:live-dry-run": "ALPHA_CRON_COMMAND=\"npm run alpha:live-dry-run\" tsx src/alpha/alphaCron.ts",

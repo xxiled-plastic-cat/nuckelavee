@@ -266,7 +266,10 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   underwaterInventoryUnrealisedLossUsd: number;
   rewardEligibleExitOrders: number;
   rewardEligibleExitNotionalUsd: number;
+  rewardEligibleOrders: number;
+  rewardEligibleLiquidityUsd: number;
   activeRewardBidOrders: number;
+  activeRewardOrders: number;
   activeRewardRateDailyUsd: number;
   activeRewardRateHourlyUsd: number;
   potentialRewardRateDailyUsd: number;
@@ -276,6 +279,7 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   const bids = open.filter((order) => order.side === "bid");
   const rewardBids = bids.filter((order) => order.source === "reward");
   const rewardEligibleBids = bids.filter((order) => order.rewardEligible);
+  const rewardEligibleOrders = open.filter((order) => order.rewardEligible);
   const spreadBids = bids.filter((order) => order.source === "spread");
   const exits = open.filter((order) => order.side === "ask" || order.source === "inventory_exit");
   const controlledExits = exits.filter((order) => order.reason.startsWith("controlled underwater exit"));
@@ -291,22 +295,23 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   const minDwellSeconds = config?.rewardMinDwellSeconds ?? 0;
   const now = Date.now();
   const marketEligibility = new Map<string, { restingContracts: number; minContracts: number }>();
-  for (const order of rewardEligibleBids) {
+  for (const order of rewardEligibleOrders) {
     const current = marketEligibility.get(order.marketId) ?? { restingContracts: 0, minContracts: order.rewardMinContracts ?? 0 };
     current.restingContracts += order.remainingShares;
     current.minContracts = Math.max(current.minContracts, order.rewardMinContracts ?? 0);
     marketEligibility.set(order.marketId, current);
   }
-  const activeRewardBids = rewardEligibleBids.filter((order) => {
+  const activeRewardOrders = rewardEligibleOrders.filter((order) => {
     const created = Date.parse(order.createdAt);
     const ageSeconds = Number.isFinite(created) ? Math.max(0, (now - created) / 1000) : 0;
     const eligibility = marketEligibility.get(order.marketId);
     return ageSeconds >= minDwellSeconds && (eligibility?.restingContracts ?? 0) >= (eligibility?.minContracts ?? 0);
   });
-  const rewardRateDaily = (orders: typeof rewardEligibleBids) =>
+  const activeRewardBids = activeRewardOrders.filter((order) => order.side === "bid");
+  const rewardRateDaily = (orders: typeof rewardEligibleOrders) =>
     orders.reduce((sum, order) => sum + (order.estimatedRewardUsdPerDay ?? 0) * rewardShare, 0);
-  const activeRewardRateDailyUsd = rewardRateDaily(activeRewardBids);
-  const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleBids);
+  const activeRewardRateDailyUsd = rewardRateDaily(activeRewardOrders);
+  const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleOrders);
   const underwaterPositions = Object.values(state.positionsByMarket).filter((position) => position.unrealisedPnl < 0);
 
   return {
@@ -331,7 +336,10 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     underwaterInventoryUnrealisedLossUsd: underwaterPositions.reduce((sum, position) => sum + Math.abs(position.unrealisedPnl), 0),
     rewardEligibleExitOrders: rewardEligibleExits.length,
     rewardEligibleExitNotionalUsd: exitNotional(rewardEligibleExits),
+    rewardEligibleOrders: rewardEligibleOrders.length,
+    rewardEligibleLiquidityUsd: rewardEligibleOrders.reduce((sum, order) => sum + order.price * order.remainingShares, 0),
     activeRewardBidOrders: activeRewardBids.length,
+    activeRewardOrders: activeRewardOrders.length,
     activeRewardRateDailyUsd,
     activeRewardRateHourlyUsd: activeRewardRateDailyUsd / 24,
     potentialRewardRateDailyUsd,
@@ -351,6 +359,7 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
   console.log(`  bidExposure: ${fmtUsd(exposure.bidExposureUsd)}`);
   console.log(`  rewardBidExposure: ${fmtUsd(exposure.rewardBidExposureUsd)} (${exposure.rewardBidOrders} order(s))`);
   console.log(`  rewardEligibleBidExposure: ${fmtUsd(exposure.rewardEligibleBidExposureUsd)} (${exposure.rewardEligibleBidOrders} order(s))`);
+  console.log(`  rewardEligibleLiquidity: ${fmtUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} order(s), bid+ask)`);
   console.log(`  spreadBidExposure: ${fmtUsd(exposure.spreadBidExposureUsd)} (${exposure.spreadBidOrders} order(s))`);
   console.log(`  exitNotional: ${fmtUsd(exposure.exitNotionalUsd)} (${exposure.exitOrders} order(s), not counted as exposure)`);
   console.log(`  controlledExitNotional: ${fmtUsd(exposure.controlledExitNotionalUsd)} (subset of exit notional)`);
@@ -366,8 +375,8 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
   console.log(`  tradingPnl: ${fmtUsd(state.totalPnl)}`);
   console.log(
     `  activeRewardRate: ${fmtRewardUsd(exposure.activeRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour, ${
-      exposure.activeRewardBidOrders
-    } active bid(s))`,
+      exposure.activeRewardOrders
+    } active order(s), ${exposure.activeRewardBidOrders} active bid(s))`,
   );
   console.log(`  potentialRewardRate: ${fmtRewardUsd(exposure.potentialRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour)`);
   console.log(`  spreadPnl: ${fmtUsd(state.strategyStats.spreadRealisedPnl)}`);

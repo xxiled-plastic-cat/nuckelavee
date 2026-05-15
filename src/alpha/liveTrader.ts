@@ -1,6 +1,6 @@
 import type { AlphaConfig, AlphaMode } from "./alphaConfig.js";
 import { validateLiveConfig } from "./alphaConfig.js";
-import { AlphaSdkClient, fromMicroUnits } from "./alphaClient.js";
+import { AlphaSdkClient, fromMicroUnits, roundShares } from "./alphaClient.js";
 import { checkQuoteRisk } from "./alphaRiskManager.js";
 import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaQuote } from "./alphaTypes.js";
@@ -523,7 +523,7 @@ function rewardOrderInsideCurrentZone(
   market: AlphaMarket | undefined,
   book: AlphaOrderbook | undefined,
 ): boolean {
-  if (order.source !== "reward" || order.side !== "bid") return false;
+  if (!order.rewardEligible) return false;
   if (!market?.reward.isRewardMarket) return false;
   if (market.reward.maxRewardSpreadCents === undefined) return false;
   if (!book || book.source === "unavailable") return false;
@@ -531,6 +531,79 @@ function rewardOrderInsideCurrentZone(
   if (midpoint === undefined) return false;
   const distanceCents = Math.abs(midpoint - order.price) * 100;
   return distanceCents <= market.reward.maxRewardSpreadCents;
+}
+
+function rewardContractsByMarket(state: AlphaBotState): Map<number, number> {
+  const contracts = new Map<number, number>();
+  for (const order of state.openOrders) {
+    if (order.runMode !== "live" || order.status !== "open" || !order.rewardEligible) continue;
+    contracts.set(order.marketAppId, (contracts.get(order.marketAppId) ?? 0) + order.remainingShares);
+  }
+  return contracts;
+}
+
+function rewardMinContractsForOrder(order: AlphaPaperOrder, market: AlphaMarket | undefined): number | undefined {
+  const configuredMin = order.rewardMinContracts ?? market?.reward.minContracts;
+  return configuredMin === undefined || configuredMin <= 0 ? undefined : configuredMin;
+}
+
+function decrementRewardContracts(contractsByMarket: Map<number, number>, order: AlphaPaperOrder): void {
+  if (!order.rewardEligible) return;
+  const current = contractsByMarket.get(order.marketAppId) ?? 0;
+  contractsByMarket.set(order.marketAppId, Math.max(0, current - order.remainingShares));
+}
+
+function quoteMinNotionalUsd(quote: AlphaQuote, config: AlphaConfig): number {
+  if (quote.source === "reward") return Math.max(0, config.rewardMinOrderSizeUsd);
+  if (quote.source === "spread") return Math.max(0, config.spreadMinOrderSizeUsd);
+  return 0;
+}
+
+function resizeBidQuoteToBudget(
+  quote: AlphaQuote,
+  remainingLiveBidUsdc: number,
+  config: AlphaConfig,
+): { quote?: AlphaQuote; reason?: string; resized: boolean } {
+  const requiredUsdc = requiredBidUsdc(quote, config);
+  if (requiredUsdc <= remainingLiveBidUsdc) return { quote, resized: false };
+  const budgetMultiplier = 1 + config.liveBidUsdcBufferBps / 10_000;
+  if (budgetMultiplier <= 0) return { reason: "invalid live bid buffer configuration", resized: false };
+  const maxNotionalUsd = remainingLiveBidUsdc / budgetMultiplier;
+  const minNotionalUsd = quoteMinNotionalUsd(quote, config);
+  if (maxNotionalUsd < minNotionalUsd) {
+    return {
+      reason: `wallet USDC ${remainingLiveBidUsdc.toFixed(2)} only funds up to $${maxNotionalUsd.toFixed(
+        2,
+      )} after buffer, below lane minimum $${minNotionalUsd.toFixed(2)}`,
+      resized: false,
+    };
+  }
+  const sizeShares = roundShares(maxNotionalUsd / quote.price);
+  if (sizeShares <= 0) {
+    return {
+      reason: `wallet USDC ${remainingLiveBidUsdc.toFixed(2)} cannot fund minimum share precision at ${quote.price.toFixed(3)}`,
+      resized: false,
+    };
+  }
+  const notionalUsd = quote.price * sizeShares;
+  if (notionalUsd + 0.000001 < minNotionalUsd) {
+    return {
+      reason: `resized notional $${notionalUsd.toFixed(2)} falls below lane minimum $${minNotionalUsd.toFixed(2)}`,
+      resized: false,
+    };
+  }
+  const resizedQuote: AlphaQuote = {
+    ...quote,
+    sizeShares,
+    notionalUsd,
+  };
+  if (requiredBidUsdc(resizedQuote, config) > remainingLiveBidUsdc + 0.000001) {
+    return {
+      reason: `wallet USDC ${remainingLiveBidUsdc.toFixed(2)} remains below buffered resized requirement`,
+      resized: false,
+    };
+  }
+  return { quote: resizedQuote, resized: true };
 }
 
 function exitOrderWouldLoseMoney(order: AlphaPaperOrder, state: AlphaBotState, config: AlphaConfig): boolean {
@@ -801,12 +874,14 @@ export async function runLiveTick(
     if (!intendedQuoteByKey.has(quoteKey(quote))) intendedQuoteByKey.set(quoteKey(quote), quote);
   }
 
+  const retainedRewardContracts = rewardContractsByMarket(state);
   for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open")) {
     const escrowAppId = order.liveEscrowAppId;
     if (escrowAppId === undefined) continue;
     const market = marketByAppId.get(order.marketAppId);
     const book = scan.orderbooks.get(order.marketAppId);
     const intended = intendedQuoteByKey.get(quoteKey(order));
+    const ageSeconds = orderAgeSeconds(order);
     if (intended && isEquivalentQuote(order, intended, config)) {
       order.reason = intended.reason;
       order.rewardEligible = intended.rewardEligible;
@@ -820,19 +895,36 @@ export async function runLiveTick(
       });
       continue;
     }
+    const inRewardZone = rewardOrderInsideCurrentZone(order, market, book);
+    const rewardMinContracts = rewardMinContractsForOrder(order, market);
+    const aggregateRewardContracts = retainedRewardContracts.get(order.marketAppId) ?? 0;
+    const supportsRewardThreshold =
+      rewardMinContracts !== undefined &&
+      aggregateRewardContracts >= rewardMinContracts &&
+      aggregateRewardContracts - order.remainingShares < rewardMinContracts;
+    if (inRewardZone && ageSeconds < config.rewardMinDwellSeconds) {
+      actions.push({
+        kind: "skip",
+        message: `Kept reward-eligible order escrowAppId=${escrowAppId}; resting ${Math.floor(ageSeconds)}/${
+          config.rewardMinDwellSeconds
+        }s while still inside reward zone`,
+      });
+      continue;
+    }
+    if (inRewardZone && supportsRewardThreshold) {
+      actions.push({
+        kind: "skip",
+        message: `Kept reward-eligible order escrowAppId=${escrowAppId}; contributes to aggregate minimum ${rewardMinContracts?.toFixed(
+          6,
+        )} while inside reward zone`,
+      });
+      continue;
+    }
     const reason = intended
       ? `current quote moved ${quoteDeltaCents(order, intended).toFixed(2)}c`
       : "market no longer has a qualifying quote";
-    if (order.source === "reward" && order.side === "bid" && orderAgeSeconds(order) < config.rewardMinDwellSeconds) {
-      if (rewardOrderInsideCurrentZone(order, market, book)) {
-        actions.push({
-          kind: "skip",
-          message: `Kept reward order escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}/${
-            config.rewardMinDwellSeconds
-          }s while still inside reward zone`,
-        });
-        continue;
-      }
+    if (order.source === "reward" && order.side === "bid" && ageSeconds < config.rewardMinDwellSeconds) {
+      if (inRewardZone) continue;
       actions.push({
         kind: "skip",
         message: `Reward order escrowAppId=${escrowAppId} is under minimum dwell but outside current reward zone; allowing refresh`,
@@ -883,6 +975,7 @@ export async function runLiveTick(
       if (result.success) {
         order.status = "cancelled";
         order.updatedAt = new Date().toISOString();
+        decrementRewardContracts(retainedRewardContracts, order);
         state.cancelledOrders.push({ ...order });
         state.strategyStats.liveOrdersCancelled += 1;
         actions.push({ kind: "cancel", message: `Cancelled live order escrowAppId=${escrowAppId}; ${reason}` });
@@ -977,84 +1070,119 @@ export async function runLiveTick(
     pushQuote(exit);
   }
 
-  const rewardWindow = placementQueue;
-  const selectedRewardContractsByMarket = new Map<number, number>();
-  for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open" && candidate.rewardEligible)) {
-    selectedRewardContractsByMarket.set(order.marketAppId, (selectedRewardContractsByMarket.get(order.marketAppId) ?? 0) + order.remainingShares);
-  }
-  for (const quote of rewardWindow.filter((candidate) => candidate.rewardEligible)) {
-    selectedRewardContractsByMarket.set(quote.marketAppId, (selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0) + quote.sizeShares);
-  }
+  const selectedRewardContractsByMarket = rewardContractsByMarket(state);
 
   let remainingLiveBidUsdc = walletUsdcBalanceUsd;
+  let reportedBidBudgetDepleted = false;
   for (const quote of placementQueue) {
-    const aggregateRewardContracts = selectedRewardContractsByMarket.get(quote.marketAppId) ?? 0;
-    if (quote.source === "reward" && quote.rewardMinContracts !== undefined && aggregateRewardContracts < quote.rewardMinContracts) {
-      actions.push({
-        kind: "skip",
-        message: `${quote.title} aggregate reward contracts ${aggregateRewardContracts.toFixed(6)} below minimum ${quote.rewardMinContracts.toFixed(6)}`,
-      });
-      continue;
-    }
-    const risk = checkQuoteRisk(quote, state, config, mode);
-    if (!risk.allowed) {
-      actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} ${quote.side}: ${risk.reason}` });
-      continue;
-    }
-    if ((mode === "live" || mode === "live-dry-run") && quote.side === "bid") {
+    let quoteToPlace = quote;
+    if ((mode === "live" || mode === "live-dry-run") && quoteToPlace.side === "bid") {
       if (remainingLiveBidUsdc === undefined) {
-        actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} bid: wallet USDC unavailable; skipping live bid placement` });
+        actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: wallet USDC unavailable; skipping live bid placement` });
         continue;
       }
-      const requiredUsdc = requiredBidUsdc(quote, config);
-      if (requiredUsdc > remainingLiveBidUsdc) {
+      const resized = resizeBidQuoteToBudget(quoteToPlace, remainingLiveBidUsdc, config);
+      if (!resized.quote) {
+        if (remainingLiveBidUsdc <= 0.000001) {
+          if (!reportedBidBudgetDepleted) {
+            actions.push({
+              kind: "skip",
+              message: `Bid budget depleted; skipping remaining bid candidates (lane minimums start at $${quoteMinNotionalUsd(
+                quoteToPlace,
+                config,
+              ).toFixed(2)})`,
+            });
+            reportedBidBudgetDepleted = true;
+          }
+          continue;
+        }
         actions.push({
           kind: "skip",
-          message: `${quote.title} ${quote.outcome} bid: wallet USDC ${remainingLiveBidUsdc.toFixed(2)} below required ${requiredUsdc.toFixed(
-            2,
-          )} including ${(config.liveBidUsdcBufferBps / 100).toFixed(2)}% buffer`,
+          message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: ${resized.reason ?? "insufficient wallet USDC for buffered order placement"}`,
         });
         continue;
       }
-    }
-    if (mode === "live-dry-run") {
-      if (quote.side === "bid" && remainingLiveBidUsdc !== undefined) {
-        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quote, config));
+      if (resized.resized) {
+        quoteToPlace = resized.quote;
+        actions.push({
+          kind: "skip",
+          message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: resized to $${quoteToPlace.notionalUsd.toFixed(
+            2,
+          )} to fit wallet USDC ${remainingLiveBidUsdc.toFixed(2)} with ${(config.liveBidUsdcBufferBps / 100).toFixed(2)}% buffer`,
+        });
       }
+    }
+    const aggregateRewardContracts =
+      (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) +
+      (quoteToPlace.rewardEligible ? quoteToPlace.sizeShares : 0);
+    if (
+      quoteToPlace.source === "reward" &&
+      quoteToPlace.rewardMinContracts !== undefined &&
+      aggregateRewardContracts < quoteToPlace.rewardMinContracts
+    ) {
       actions.push({
-        kind: "place",
-        message: `Would place ${quote.source} ${quote.title} ${quote.outcome} ${quote.side} ${quote.price.toFixed(3)} size $${quote.notionalUsd.toFixed(
-          2,
-        )} / ${quote.sizeShares.toFixed(6)} shares; ${quote.reason}`,
+        kind: "skip",
+        message: `${quoteToPlace.title} aggregate reward contracts ${aggregateRewardContracts.toFixed(6)} below minimum ${quoteToPlace.rewardMinContracts.toFixed(
+          6,
+        )}`,
       });
       continue;
     }
-    if (quote.side === "ask" && quote.source !== "inventory_exit") {
-      actions.push({ kind: "skip", message: `${quote.title} ${quote.outcome} ask skipped unless it is an inventory exit` });
+    const risk = checkQuoteRisk(quoteToPlace, state, config, mode);
+    if (!risk.allowed) {
+      actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} ${quoteToPlace.side}: ${risk.reason}` });
+      continue;
+    }
+    if (mode === "live-dry-run") {
+      if (quoteToPlace.side === "bid" && remainingLiveBidUsdc !== undefined) {
+        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quoteToPlace, config));
+      }
+      if (quoteToPlace.rewardEligible) {
+        selectedRewardContractsByMarket.set(
+          quoteToPlace.marketAppId,
+          (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) + quoteToPlace.sizeShares,
+        );
+      }
+      actions.push({
+        kind: "place",
+        message: `Would place ${quoteToPlace.source} ${quoteToPlace.title} ${quoteToPlace.outcome} ${quoteToPlace.side} ${quoteToPlace.price.toFixed(3)} size $${quoteToPlace.notionalUsd.toFixed(
+          2,
+        )} / ${quoteToPlace.sizeShares.toFixed(6)} shares; ${quoteToPlace.reason}`,
+      });
+      continue;
+    }
+    if (quoteToPlace.side === "ask" && quoteToPlace.source !== "inventory_exit") {
+      actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} ask skipped unless it is an inventory exit` });
       continue;
     }
     try {
       const result = await liveClient.createLimitOrder({
-        marketAppId: quote.marketAppId,
-        outcome: quote.outcome,
-        price: quote.price,
-        sizeShares: quote.sizeShares,
-        isBuying: quote.side === "bid",
+        marketAppId: quoteToPlace.marketAppId,
+        outcome: quoteToPlace.outcome,
+        price: quoteToPlace.price,
+        sizeShares: quoteToPlace.sizeShares,
+        isBuying: quoteToPlace.side === "bid",
       });
-      state.openOrders.push(toTrackedLiveOrder(quote, result));
+      state.openOrders.push(toTrackedLiveOrder(quoteToPlace, result));
       state.strategyStats.liveOrdersPlaced += 1;
-      if (quote.side === "bid" && remainingLiveBidUsdc !== undefined) {
-        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quote, config));
+      if (quoteToPlace.side === "bid" && remainingLiveBidUsdc !== undefined) {
+        remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quoteToPlace, config));
       }
-      actions.push({ kind: "place", message: `Placed ${quote.title} ${quote.outcome} ${quote.side} escrowAppId=${result.escrowAppId}` });
+      if (quoteToPlace.rewardEligible) {
+        selectedRewardContractsByMarket.set(
+          quoteToPlace.marketAppId,
+          (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) + quoteToPlace.sizeShares,
+        );
+      }
+      actions.push({ kind: "place", message: `Placed ${quoteToPlace.title} ${quoteToPlace.outcome} ${quoteToPlace.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[alpha-live] place failed ${quote.title} ${quote.outcome}: ${message}`);
-      if (quote.side === "bid" && message.includes("underflow on subtracting")) {
+      console.error(`[alpha-live] place failed ${quoteToPlace.title} ${quoteToPlace.outcome}: ${message}`);
+      if (quoteToPlace.side === "bid" && message.includes("underflow on subtracting")) {
         remainingLiveBidUsdc = 0;
       }
-      actions.push({ kind: "skip", message: `Place failed ${quote.title} ${quote.outcome}: ${message}` });
+      actions.push({ kind: "skip", message: `Place failed ${quoteToPlace.title} ${quoteToPlace.outcome}: ${message}` });
     }
   }
   state.strategyStats.lastRunMode = mode;

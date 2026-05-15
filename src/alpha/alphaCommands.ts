@@ -21,6 +21,7 @@ import { runPaperTick, loadPaperReport } from "./paperTrader.js";
 import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
 import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
+import { runResolvedAssetCleanup } from "./alphaResolvedAssetCleanup.js";
 import { closeDatabase } from "../db.js";
 import { isDebugModeEnabled } from "../utils/debugMode.js";
 
@@ -329,6 +330,7 @@ function buildTickDigestMessage(result: {
     `bid_exposure=${formatUsd(exposure.bidExposureUsd)} reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)} reward_eligible_bid_exposure=${formatUsd(
       exposure.rewardEligibleBidExposureUsd,
     )} spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
+    `reward_eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} reward_eligible_orders=${exposure.rewardEligibleOrders}`,
     `exit_notional=${formatUsd(exposure.exitNotionalUsd)} reward_eligible_exit_notional=${formatUsd(
       exposure.rewardEligibleExitNotionalUsd,
     )} exits_not_counted_as_exposure=true`,
@@ -339,7 +341,7 @@ function buildTickDigestMessage(result: {
     `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
     `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day potential_reward_rate=${formatRewardUsd(
       exposure.potentialRewardRateDailyUsd,
-    )}/day est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
+    )}/day active_reward_orders=${exposure.activeRewardOrders} est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
     `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
@@ -399,6 +401,8 @@ function buildDailySummaryMessage(
     `bid_exposure=${formatUsd(exposure.bidExposureUsd)}`,
     `reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)}`,
     `reward_eligible_bid_exposure=${formatUsd(exposure.rewardEligibleBidExposureUsd)}`,
+    `reward_eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)}`,
+    `reward_eligible_orders=${exposure.rewardEligibleOrders}`,
     `spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
     `exit_notional=${formatUsd(exposure.exitNotionalUsd)}`,
     `reward_eligible_exit_notional=${formatUsd(exposure.rewardEligibleExitNotionalUsd)}`,
@@ -410,6 +414,7 @@ function buildDailySummaryMessage(
     `realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `trading_pnl=${formatUsd(state.totalPnl)}`,
     `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day`,
+    `active_reward_orders=${exposure.activeRewardOrders}`,
     `potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day`,
     `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)}`,
     `parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
@@ -463,11 +468,52 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
   logStartupDebug(`runLiveCommand end mode=${mode} elapsed_ms=${Date.now() - startedAt}`);
 }
 
+type ResolvedAssetCleanupArgs = {
+  execute: boolean;
+  limit?: number;
+};
+
+function parseResolvedAssetCleanupArgs(args: string[]): ResolvedAssetCleanupArgs {
+  let execute = false;
+  let limit: number | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--execute") {
+      execute = true;
+      continue;
+    }
+    if (arg === "--limit") {
+      const value = args[i + 1];
+      if (!value) throw new Error("Missing value for --limit");
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Invalid --limit value: ${value}`);
+      limit = parsed;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--limit=")) {
+      const value = arg.slice("--limit=".length);
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`Invalid --limit value: ${value}`);
+      limit = parsed;
+      continue;
+    }
+    throw new Error(`Unknown argument for resolved-asset-cleanup: ${arg}`);
+  }
+  return { execute, limit };
+}
+
+async function runResolvedAssetCleanupCommand(args: string[]): Promise<void> {
+  const parsed = parseResolvedAssetCleanupArgs(args);
+  await runResolvedAssetCleanup(parsed);
+}
+
 function printUsage(): void {
   console.log(
-    "Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|reward-history|watch|market|paper|paper-watch|paper-report|live-dry-run|live>",
+    "Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|reward-history|watch|market|paper|paper-watch|paper-report|live-dry-run|live|resolved-asset-cleanup>",
   );
   console.log("  reward-history args: [receiverAddress] [rewardSenderAddress]");
+  console.log("  resolved-asset-cleanup args: [--execute] [--limit N]");
 }
 
 async function main(): Promise<void> {
@@ -485,6 +531,7 @@ async function main(): Promise<void> {
   if (command === "paper-report") return runPaperReportCommand();
   if (command === "live-dry-run") return runLiveCommand("live-dry-run");
   if (command === "live") return runLiveCommand("live");
+  if (command === "resolved-asset-cleanup") return runResolvedAssetCleanupCommand(process.argv.slice(3));
   printUsage();
   process.exitCode = 1;
 }
