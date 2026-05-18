@@ -37,6 +37,8 @@
     "poly:paper": "tsx src/polymarket/polyCommands.ts paper",
     "poly:paper-watch": "tsx src/polymarket/polyCommands.ts paper-watch",
     "poly:paper-report": "tsx src/polymarket/polyCommands.ts paper-report",
+    "poly:cron": "tsx src/polymarket/polyCron.ts",
+    "poly:cron:once": "tsx src/polymarket/polyCron.ts --once",
     "poly:typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",

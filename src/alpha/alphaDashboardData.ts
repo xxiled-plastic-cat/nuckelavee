@@ -4,7 +4,7 @@ import { readAlphaConfig } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits } from "./alphaClient.js";
 import { summarizeLiveExposure } from "./alphaFormatter.js";
 import { loadAlphaState } from "./alphaStateStore.js";
-import type { AlphaBotState, AlphaPaperOrder } from "./alphaTypes.js";
+import type { AlphaBotState, AlphaPaperOrder, AlphaPaperPosition } from "./alphaTypes.js";
 
 export type DashboardPositionRow = {
   marketId: string;
@@ -14,6 +14,7 @@ export type DashboardPositionRow = {
   outcome: "YES" | "NO";
   shares: number;
   avgCost?: number;
+  lockedUsd?: number;
   mark?: number;
   unrealisedPnl?: number;
   valueUsd?: number;
@@ -96,6 +97,7 @@ function toPositionRowsFromState(state: AlphaBotState): DashboardPositionRow[] {
   const rows: DashboardPositionRow[] = [];
   for (const position of Object.values(state.positionsByMarket)) {
     if (position.yesShares > 0) {
+      const mark = position.lastMark;
       rows.push({
         marketId: position.marketId,
         marketAppId: position.marketAppId,
@@ -104,12 +106,14 @@ function toPositionRowsFromState(state: AlphaBotState): DashboardPositionRow[] {
         outcome: "YES",
         shares: position.yesShares,
         avgCost: position.avgYesCost,
-        mark: position.lastMark,
-        unrealisedPnl: position.unrealisedPnl,
-        valueUsd: position.lastMark !== undefined ? position.lastMark * position.yesShares : undefined,
+        lockedUsd: position.avgYesCost * position.yesShares,
+        mark,
+        unrealisedPnl: mark !== undefined ? (mark - position.avgYesCost) * position.yesShares : undefined,
+        valueUsd: mark !== undefined ? mark * position.yesShares : undefined,
       });
     }
     if (position.noShares > 0) {
+      const mark = position.lastMark !== undefined ? 1 - position.lastMark : undefined;
       rows.push({
         marketId: position.marketId,
         marketAppId: position.marketAppId,
@@ -118,42 +122,66 @@ function toPositionRowsFromState(state: AlphaBotState): DashboardPositionRow[] {
         outcome: "NO",
         shares: position.noShares,
         avgCost: position.avgNoCost,
-        mark: position.lastMark !== undefined ? 1 - position.lastMark : undefined,
-        unrealisedPnl: position.unrealisedPnl,
-        valueUsd: position.lastMark !== undefined ? (1 - position.lastMark) * position.noShares : undefined,
+        lockedUsd: position.avgNoCost * position.noShares,
+        mark,
+        unrealisedPnl: mark !== undefined ? (mark - position.avgNoCost) * position.noShares : undefined,
+        valueUsd: mark !== undefined ? mark * position.noShares : undefined,
       });
     }
   }
-  return rows.sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0));
+  return rows.sort((a, b) => (b.lockedUsd ?? b.valueUsd ?? 0) - (a.lockedUsd ?? a.valueUsd ?? 0));
 }
 
-function toPositionRowsFromWallet(positions: WalletPosition[], slugByMarketAppId: Map<number, string>): DashboardPositionRow[] {
+function knownAvgCost(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function toPositionRowsFromWallet(
+  positions: WalletPosition[],
+  slugByMarketAppId: Map<number, string>,
+  trackedByMarketAppId: Map<number, AlphaPaperPosition>,
+): DashboardPositionRow[] {
   const rows: DashboardPositionRow[] = [];
   for (const position of positions) {
     const yesShares = fromMicroUnits(position.yesBalance) ?? 0;
     const noShares = fromMicroUnits(position.noBalance) ?? 0;
+    const tracked = trackedByMarketAppId.get(position.marketAppId);
     if (yesShares > 0) {
+      const avgCost = knownAvgCost(tracked?.avgYesCost);
+      const mark = tracked?.lastMark;
       rows.push({
         marketId: String(position.marketAppId),
         marketAppId: position.marketAppId,
-        slug: slugByMarketAppId.get(position.marketAppId),
+        slug: tracked?.slug ?? slugByMarketAppId.get(position.marketAppId),
         title: position.title,
         outcome: "YES",
         shares: yesShares,
+        avgCost,
+        lockedUsd: avgCost !== undefined ? avgCost * yesShares : undefined,
+        mark,
+        unrealisedPnl: avgCost !== undefined && mark !== undefined ? (mark - avgCost) * yesShares : undefined,
+        valueUsd: mark !== undefined ? mark * yesShares : undefined,
       });
     }
     if (noShares > 0) {
+      const avgCost = knownAvgCost(tracked?.avgNoCost);
+      const mark = tracked?.lastMark !== undefined ? 1 - tracked.lastMark : undefined;
       rows.push({
         marketId: String(position.marketAppId),
         marketAppId: position.marketAppId,
-        slug: slugByMarketAppId.get(position.marketAppId),
+        slug: tracked?.slug ?? slugByMarketAppId.get(position.marketAppId),
         title: position.title,
         outcome: "NO",
         shares: noShares,
+        avgCost,
+        lockedUsd: avgCost !== undefined ? avgCost * noShares : undefined,
+        mark,
+        unrealisedPnl: avgCost !== undefined && mark !== undefined ? (mark - avgCost) * noShares : undefined,
+        valueUsd: mark !== undefined ? mark * noShares : undefined,
       });
     }
   }
-  return rows.sort((a, b) => b.shares - a.shares);
+  return rows.sort((a, b) => (b.lockedUsd ?? b.valueUsd ?? b.shares) - (a.lockedUsd ?? a.valueUsd ?? a.shares));
 }
 
 function toOpenOrderRow(order: AlphaPaperOrder): DashboardOpenOrderRow {
@@ -346,7 +374,17 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
       liveOrdersPlaced: state.strategyStats.liveOrdersPlaced,
       liveOrdersCancelled: state.strategyStats.liveOrdersCancelled,
     },
-    positions: walletPositions ? toPositionRowsFromWallet(walletPositions, slugByMarketAppId) : toPositionRowsFromState(state),
+    positions: walletPositions
+      ? toPositionRowsFromWallet(
+          walletPositions,
+          slugByMarketAppId,
+          new Map(
+            Object.values(state.positionsByMarket)
+              .filter((position) => position.marketAppId !== undefined)
+              .map((position) => [position.marketAppId as number, position]),
+          ),
+        )
+      : toPositionRowsFromState(state),
     openOrders: walletOrders
       ? toOpenOrderRowsFromWallet(
           walletOrders,

@@ -10,6 +10,11 @@ function fmtUsd(value: number | undefined): string {
   return `${sign}$${value.toFixed(2)}`;
 }
 
+function fmtUsdAmount(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  return `$${value.toFixed(2)}`;
+}
+
 function fmtShares(value: number): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
 }
@@ -17,6 +22,12 @@ function fmtShares(value: number): string {
 function fmtPrice(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "-";
   return value.toFixed(3);
+}
+
+function totalLockedUsd(positions: DashboardSnapshot["positions"]): number | undefined {
+  if (positions.length === 0) return 0;
+  if (!positions.some((position) => Number.isFinite(position.lockedUsd))) return undefined;
+  return positions.reduce((sum, position) => sum + (position.lockedUsd ?? 0), 0);
 }
 
 function fmtTime(value: string): string {
@@ -67,9 +78,11 @@ export default function App() {
 
   const metrics = useMemo<MetricCard[]>(() => {
     if (!snapshot) return [];
+    const positionLockedUsd = totalLockedUsd(snapshot.positions);
     return [
       { label: "Trading PnL", value: fmtUsd(snapshot.overview.tradingPnl) },
       { label: "Estimated Rewards", value: fmtUsd(snapshot.overview.estimatedRewardsUsd) },
+      { label: "Position Cost", value: fmtUsdAmount(positionLockedUsd) },
       { label: "Bid Exposure", value: fmtUsd(snapshot.overview.bidExposureUsd) },
       { label: "Open Orders", value: String(snapshot.overview.openOrders) },
       { label: "Active Reward Rate", value: `${fmtUsd(snapshot.overview.activeRewardRateDailyUsd)}/day` },
@@ -117,7 +130,12 @@ export default function App() {
 
             <section className="layout-grid">
               <article className="card table-card">
-                <h2>Positions ({snapshot.positions.length})</h2>
+                <div className="section-heading">
+                  <h2>Positions ({snapshot.positions.length})</h2>
+                  <p>
+                    {fmtUsdAmount(totalLockedUsd(snapshot.positions))} locked
+                  </p>
+                </div>
                 {snapshot.positions.length === 0 ? (
                   <p className="empty">No open positions found.</p>
                 ) : (
@@ -127,6 +145,7 @@ export default function App() {
                         <th>Market</th>
                         <th>Outcome</th>
                         <th>Shares</th>
+                        <th>Locked</th>
                         <th>Avg Cost</th>
                         <th>Mark</th>
                         <th>Unrealized</th>
@@ -146,6 +165,7 @@ export default function App() {
                           <td>{position.title}</td>
                           <td>{position.outcome}</td>
                           <td>{fmtShares(position.shares)}</td>
+                          <td>{fmtUsdAmount(position.lockedUsd)}</td>
                           <td>{fmtPrice(position.avgCost)}</td>
                           <td>{fmtPrice(position.mark)}</td>
                           <td>{fmtUsd(position.unrealisedPnl)}</td>

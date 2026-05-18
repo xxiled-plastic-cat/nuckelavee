@@ -1,6 +1,7 @@
 import type { PolyConfig } from "./polyConfig.js";
 import { PolyClient } from "./polyClient.js";
 import type { PolyMarket, PolyOrderbook, PolyScanResult, PolyTokenBookPair } from "./polyTypes.js";
+import { loadInactiveConditionIds, statusFromPolyMarket, upsertPolyMarketStatus } from "./polyMarketStatusStore.js";
 
 function tokenPairForMarket(market: PolyMarket, orderbooksByTokenId: Map<string, PolyOrderbook>): PolyTokenBookPair {
   const [first, second] = market.tokens;
@@ -41,7 +42,19 @@ function mergeMarkets(rewardMarkets: PolyMarket[], liveMarkets: PolyMarket[], ma
 export async function loadPolyScan(config: PolyConfig): Promise<PolyScanResult> {
   const client = new PolyClient(config);
   const [rewardMarkets, liveMarkets] = await Promise.all([client.getRewardMarkets(), client.getLiveMarkets()]);
-  const markets = mergeMarkets(rewardMarkets, liveMarkets, config.maxMarketsPerScan);
+  const seenMarkets = mergeMarkets(rewardMarkets, liveMarkets, config.maxMarketsPerScan);
+  let markets = seenMarkets;
+  const seenAt = new Date();
+  try {
+    const inactiveConditionIds = await loadInactiveConditionIds(seenMarkets.map((market) => market.conditionId));
+    if (inactiveConditionIds.size > 0) {
+      markets = markets.filter((market) => !inactiveConditionIds.has(market.conditionId));
+    }
+    await upsertPolyMarketStatus(seenMarkets.map((market) => statusFromPolyMarket(market, seenAt)));
+  } catch {
+    // Keep the scanner functional when persistence is unavailable.
+  }
+
   const rewardConditions = new Set(rewardMarkets.map((market) => market.conditionId));
   const reward = markets.filter((market) => rewardConditions.has(market.conditionId) || market.reward.isRewardMarket);
 

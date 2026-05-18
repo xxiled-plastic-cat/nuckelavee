@@ -163,6 +163,25 @@ button:hover {
   overflow: hidden;
 }
 
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.section-heading h2 {
+  margin-bottom: 0;
+}
+
+.section-heading p {
+  margin: 0;
+  color: #b4abd8;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

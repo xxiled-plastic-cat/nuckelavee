@@ -6,6 +6,7 @@ export type DashboardPositionRow = {
   outcome: "YES" | "NO";
   shares: number;
   avgCost?: number;
+  lockedUsd?: number;
   mark?: number;
   unrealisedPnl?: number;
   valueUsd?: number;

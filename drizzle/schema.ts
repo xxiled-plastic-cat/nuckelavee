@@ -27,3 +27,26 @@ export const alphaMarketStatus = pgTable(
     lifecycleIdx: index("alpha_market_status_lifecycle_idx").on(table.isLive, table.isResolved, table.isClosed),
   }),
 );
+
+export const polymarketMarketStatus = pgTable(
+  "polymarket_market_status",
+  {
+    conditionId: text("condition_id").primaryKey(),
+    marketId: text("market_id"),
+    marketSlug: text("market_slug"),
+    eventId: text("event_id"),
+    eventSlug: text("event_slug"),
+    title: text("title"),
+    status: text("status"),
+    isLive: boolean("is_live").notNull().default(false),
+    isResolved: boolean("is_resolved").notNull().default(false),
+    isClosed: boolean("is_closed").notNull().default(false),
+    endDate: timestamp("end_date", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    lifecycleIdx: index("polymarket_market_status_lifecycle_idx").on(table.isLive, table.isResolved, table.isClosed),
+  }),
+);

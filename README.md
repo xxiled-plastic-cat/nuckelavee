@@ -30,6 +30,16 @@ npm run alpha:live-dry-run
 npm run alpha:live
 ```
 
+Polymarket module:
+
+```bash
+npm run poly:scan
+npm run poly:rewards
+npm run poly:paper
+npm run poly:paper-report
+npm run poly:cron
+```
+
 Alpha dashboard (read-only):
 
 ```bash
