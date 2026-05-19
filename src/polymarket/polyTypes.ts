@@ -25,6 +25,8 @@ export type PolyMarket = {
   title: string;
   active: boolean;
   closed: boolean;
+  isLive: boolean;
+  isResolved: boolean;
   endDate?: string;
   volume24h?: number;
   liquidity?: number;

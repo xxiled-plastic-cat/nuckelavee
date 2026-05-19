@@ -22,8 +22,43 @@ function toBoolean(value: unknown, fallback = false): boolean {
   return fallback;
 }
 
+function toBooleanOptional(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
+  }
+  return undefined;
+}
+
 function toString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function toDate(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+function inferLifecycle(input: Record<string, unknown>, now = new Date()): {
+  active: boolean;
+  closed: boolean;
+  isResolved: boolean;
+  isLive: boolean;
+  endDate?: string;
+} {
+  const active = toBoolean(input.active, true);
+  const closed = toBoolean(input.closed, false);
+  const explicitResolved = toBooleanOptional(input.resolved ?? input.isResolved) ?? false;
+  const endDate = toString(input.end_date ?? input.endDate ?? input.endDateIso);
+  const parsedEndDate = toDate(endDate);
+  const endedByTime = parsedEndDate !== undefined && parsedEndDate.getTime() <= now.getTime();
+  const isResolved = explicitResolved || closed || endedByTime;
+  const isLive = !isResolved && active && !closed;
+  return { active, closed, isResolved, isLive, endDate };
 }
 
 function parseJsonStringArray(value: unknown): string[] {
@@ -96,8 +131,7 @@ function buildMarket(input: Record<string, unknown>, source: PolyMarket["source"
   if (!title) return undefined;
   const tokens = parseTokens(input);
   if (tokens.length === 0) return undefined;
-  const active = toBoolean(input.active, true);
-  const closed = toBoolean(input.closed, false);
+  const lifecycle = inferLifecycle(input);
   return {
     id: toString(input.market_id ?? input.id) ?? conditionId,
     conditionId,
@@ -106,9 +140,11 @@ function buildMarket(input: Record<string, unknown>, source: PolyMarket["source"
     eventSlug: toString(input.event_slug ?? input.slug),
     marketSlug: toString(input.market_slug ?? input.slug),
     title,
-    active,
-    closed,
-    endDate: toString(input.end_date ?? input.endDate),
+    active: lifecycle.active,
+    closed: lifecycle.closed,
+    isLive: lifecycle.isLive,
+    isResolved: lifecycle.isResolved,
+    endDate: lifecycle.endDate,
     volume24h: toNumber(input.volume_24hr ?? input.volume24hr),
     liquidity: toNumber(input.liquidity ?? input.liquidityClob),
     spread: toNumber(input.spread),

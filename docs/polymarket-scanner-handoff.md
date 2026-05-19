@@ -216,3 +216,8 @@ Behavior mirrors the Alpha lifecycle cache:
 - `poly:market` lookup accepts `conditionId`, `marketSlug`, `marketId`, or `tokenId`.
 - Parity lane is disabled by default (`POLY_ENABLE_PARITY_LANE=false`).
 - Rewards and spread lanes are enabled by default.
+- Lifecycle derivation is market-level, not endpoint-level:
+  - `closed=true` is treated as the strongest ended/resolved signal.
+  - `resolved` is used when present, but may be missing from some payloads.
+  - `endDate`/`endDateIso` is used as a time-based fallback.
+  - Markets derived as non-live are filtered out of active scan outputs, and upserted into `polymarket_market_status` as inactive.

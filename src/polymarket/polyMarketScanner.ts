@@ -21,10 +21,18 @@ function mergeMarkets(rewardMarkets: PolyMarket[], liveMarkets: PolyMarket[], ma
       byCondition.set(market.conditionId, market);
       continue;
     }
+    const isClosed = previous.closed || market.closed;
+    const isResolved = previous.isResolved || market.isResolved || isClosed;
+    const active = previous.active || market.active;
+    const isLive = !isResolved && (previous.isLive || market.isLive || active);
     byCondition.set(market.conditionId, {
       ...previous,
       ...market,
       source: "merged",
+      active,
+      closed: isClosed,
+      isResolved,
+      isLive,
       reward: {
         ...previous.reward,
         ...market.reward,
@@ -39,11 +47,15 @@ function mergeMarkets(rewardMarkets: PolyMarket[], liveMarkets: PolyMarket[], ma
   return [...byCondition.values()].slice(0, maxMarkets);
 }
 
+function isMarketActiveForScan(market: PolyMarket): boolean {
+  return market.isLive && !market.isResolved && !market.closed;
+}
+
 export async function loadPolyScan(config: PolyConfig): Promise<PolyScanResult> {
   const client = new PolyClient(config);
   const [rewardMarkets, liveMarkets] = await Promise.all([client.getRewardMarkets(), client.getLiveMarkets()]);
   const seenMarkets = mergeMarkets(rewardMarkets, liveMarkets, config.maxMarketsPerScan);
-  let markets = seenMarkets;
+  let markets = seenMarkets.filter(isMarketActiveForScan);
   const seenAt = new Date();
   try {
     const inactiveConditionIds = await loadInactiveConditionIds(seenMarkets.map((market) => market.conditionId));
@@ -55,7 +67,7 @@ export async function loadPolyScan(config: PolyConfig): Promise<PolyScanResult> 
     // Keep the scanner functional when persistence is unavailable.
   }
 
-  const rewardConditions = new Set(rewardMarkets.map((market) => market.conditionId));
+  const rewardConditions = new Set(rewardMarkets.filter(isMarketActiveForScan).map((market) => market.conditionId));
   const reward = markets.filter((market) => rewardConditions.has(market.conditionId) || market.reward.isRewardMarket);
 
   const rewardSlice = reward.slice(0, config.rewardOrderbookLimit);

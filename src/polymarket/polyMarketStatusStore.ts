@@ -61,9 +61,11 @@ function inferResolved(raw: Record<string, unknown> | undefined): boolean {
 export function statusFromPolyMarket(market: PolyMarket, seenAt = new Date()): PolyMarketStatusUpsert {
   const raw = asRecord(market.raw);
   const rawStatus = readString(raw?.status);
-  const isResolved = inferResolved(raw);
-  const isClosed = Boolean(market.closed || !market.active || isResolved);
-  const isLive = Boolean(market.active && !isClosed);
+  const endDate = parseDate(market.endDate);
+  const endedByTime = endDate !== undefined && endDate.getTime() <= seenAt.getTime();
+  const isResolved = Boolean(market.isResolved || inferResolved(raw) || endedByTime || market.closed);
+  const isClosed = Boolean(market.closed || !market.active || endedByTime || isResolved);
+  const isLive = Boolean(market.isLive && !isClosed && !isResolved);
   return {
     conditionId: market.conditionId,
     marketId: market.marketId,
@@ -75,7 +77,7 @@ export function statusFromPolyMarket(market: PolyMarket, seenAt = new Date()): P
     isLive,
     isResolved,
     isClosed,
-    endDate: parseDate(market.endDate),
+    endDate,
     lastSeenAt: seenAt,
   };
 }

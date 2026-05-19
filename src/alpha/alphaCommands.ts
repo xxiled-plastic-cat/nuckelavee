@@ -36,6 +36,18 @@ function logStartupDebug(message: string): void {
   console.log(`[startup-debug ${new Date().toISOString()}] ${message}`);
 }
 
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const lines = [error.message];
+  const cause = error.cause;
+  if (cause instanceof Error) {
+    lines.push(`cause: ${cause.message}`);
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) lines.push(`cause_code: ${code}`);
+  }
+  return lines.join("\n");
+}
+
 async function buildScan(liveSigner = false) {
   const startedAt = Date.now();
   logStartupDebug(`buildScan start liveSigner=${liveSigner}`);
@@ -537,7 +549,7 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = formatError(error);
   logStartupDebug(`main failed message=${message}`);
   console.error(message);
   process.exitCode = 1;
