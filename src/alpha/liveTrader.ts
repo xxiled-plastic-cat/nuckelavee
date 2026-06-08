@@ -537,9 +537,31 @@ function rewardContractsByMarket(state: AlphaBotState): Map<number, number> {
   const contracts = new Map<number, number>();
   for (const order of state.openOrders) {
     if (order.runMode !== "live" || order.status !== "open" || !order.rewardEligible) continue;
-    contracts.set(order.marketAppId, (contracts.get(order.marketAppId) ?? 0) + order.remainingShares);
+    addRewardContracts(contracts, order.marketAppId, order.remainingShares);
   }
   return contracts;
+}
+
+function quoteRewardContracts(quote: AlphaQuote): number {
+  return quote.rewardEligible ? quote.sizeShares : 0;
+}
+
+function addRewardContracts(contractsByMarket: Map<number, number>, marketAppId: number, contracts: number): void {
+  if (contracts === 0) return;
+  contractsByMarket.set(marketAppId, Math.max(0, (contractsByMarket.get(marketAppId) ?? 0) + contracts));
+}
+
+function queuedRewardContractsByMarket(quotes: AlphaQuote[]): Map<number, number> {
+  const contracts = new Map<number, number>();
+  for (const quote of quotes) {
+    addRewardContracts(contracts, quote.marketAppId, quoteRewardContracts(quote));
+  }
+  return contracts;
+}
+
+function replacePendingRewardContracts(contractsByMarket: Map<number, number>, previous: AlphaQuote, next?: AlphaQuote): void {
+  addRewardContracts(contractsByMarket, previous.marketAppId, -quoteRewardContracts(previous));
+  if (next) addRewardContracts(contractsByMarket, next.marketAppId, quoteRewardContracts(next));
 }
 
 function rewardMinContractsForOrder(order: AlphaPaperOrder, market: AlphaMarket | undefined): number | undefined {
@@ -549,8 +571,7 @@ function rewardMinContractsForOrder(order: AlphaPaperOrder, market: AlphaMarket 
 
 function decrementRewardContracts(contractsByMarket: Map<number, number>, order: AlphaPaperOrder): void {
   if (!order.rewardEligible) return;
-  const current = contractsByMarket.get(order.marketAppId) ?? 0;
-  contractsByMarket.set(order.marketAppId, Math.max(0, current - order.remainingShares));
+  addRewardContracts(contractsByMarket, order.marketAppId, -order.remainingShares);
 }
 
 function quoteMinNotionalUsd(quote: AlphaQuote, config: AlphaConfig): number {
@@ -1071,14 +1092,22 @@ export async function runLiveTick(
   }
 
   const selectedRewardContractsByMarket = rewardContractsByMarket(state);
+  const pendingRewardContractsByMarket = queuedRewardContractsByMarket(placementQueue);
 
   let remainingLiveBidUsdc = walletUsdcBalanceUsd;
   let reportedBidBudgetDepleted = false;
   for (const quote of placementQueue) {
     let quoteToPlace = quote;
+    let pendingQuote = quote;
+    const removePendingQuote = () => replacePendingRewardContracts(pendingRewardContractsByMarket, pendingQuote);
+    const replacePendingQuote = (next: AlphaQuote) => {
+      replacePendingRewardContracts(pendingRewardContractsByMarket, pendingQuote, next);
+      pendingQuote = next;
+    };
     if ((mode === "live" || mode === "live-dry-run") && quoteToPlace.side === "bid") {
       if (remainingLiveBidUsdc === undefined) {
         actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: wallet USDC unavailable; skipping live bid placement` });
+        removePendingQuote();
         continue;
       }
       const resized = resizeBidQuoteToBudget(quoteToPlace, remainingLiveBidUsdc, config);
@@ -1094,16 +1123,19 @@ export async function runLiveTick(
             });
             reportedBidBudgetDepleted = true;
           }
+          removePendingQuote();
           continue;
         }
         actions.push({
           kind: "skip",
           message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: ${resized.reason ?? "insufficient wallet USDC for buffered order placement"}`,
         });
+        removePendingQuote();
         continue;
       }
       if (resized.resized) {
         quoteToPlace = resized.quote;
+        replacePendingQuote(quoteToPlace);
         actions.push({
           kind: "skip",
           message: `${quoteToPlace.title} ${quoteToPlace.outcome} bid: resized to $${quoteToPlace.notionalUsd.toFixed(
@@ -1112,36 +1144,35 @@ export async function runLiveTick(
         });
       }
     }
-    const aggregateRewardContracts =
-      (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) +
-      (quoteToPlace.rewardEligible ? quoteToPlace.sizeShares : 0);
+    const supportedRewardContracts =
+      (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) + (pendingRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0);
     if (
       quoteToPlace.source === "reward" &&
       quoteToPlace.rewardMinContracts !== undefined &&
-      aggregateRewardContracts < quoteToPlace.rewardMinContracts
+      supportedRewardContracts < quoteToPlace.rewardMinContracts
     ) {
       actions.push({
         kind: "skip",
-        message: `${quoteToPlace.title} aggregate reward contracts ${aggregateRewardContracts.toFixed(6)} below minimum ${quoteToPlace.rewardMinContracts.toFixed(
+        message: `${quoteToPlace.title} aggregate reward contracts ${supportedRewardContracts.toFixed(6)} below minimum ${quoteToPlace.rewardMinContracts.toFixed(
           6,
         )}`,
       });
+      removePendingQuote();
       continue;
     }
     const risk = checkQuoteRisk(quoteToPlace, state, config, mode);
     if (!risk.allowed) {
       actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} ${quoteToPlace.side}: ${risk.reason}` });
+      removePendingQuote();
       continue;
     }
     if (mode === "live-dry-run") {
+      removePendingQuote();
       if (quoteToPlace.side === "bid" && remainingLiveBidUsdc !== undefined) {
         remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quoteToPlace, config));
       }
       if (quoteToPlace.rewardEligible) {
-        selectedRewardContractsByMarket.set(
-          quoteToPlace.marketAppId,
-          (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) + quoteToPlace.sizeShares,
-        );
+        addRewardContracts(selectedRewardContractsByMarket, quoteToPlace.marketAppId, quoteRewardContracts(quoteToPlace));
       }
       actions.push({
         kind: "place",
@@ -1153,8 +1184,10 @@ export async function runLiveTick(
     }
     if (quoteToPlace.side === "ask" && quoteToPlace.source !== "inventory_exit") {
       actions.push({ kind: "skip", message: `${quoteToPlace.title} ${quoteToPlace.outcome} ask skipped unless it is an inventory exit` });
+      removePendingQuote();
       continue;
     }
+    removePendingQuote();
     try {
       const result = await liveClient.createLimitOrder({
         marketAppId: quoteToPlace.marketAppId,
@@ -1169,10 +1202,7 @@ export async function runLiveTick(
         remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quoteToPlace, config));
       }
       if (quoteToPlace.rewardEligible) {
-        selectedRewardContractsByMarket.set(
-          quoteToPlace.marketAppId,
-          (selectedRewardContractsByMarket.get(quoteToPlace.marketAppId) ?? 0) + quoteToPlace.sizeShares,
-        );
+        addRewardContracts(selectedRewardContractsByMarket, quoteToPlace.marketAppId, quoteRewardContracts(quoteToPlace));
       }
       actions.push({ kind: "place", message: `Placed ${quoteToPlace.title} ${quoteToPlace.outcome} ${quoteToPlace.side} escrowAppId=${result.escrowAppId}` });
       await saveAlphaState(config.stateKey, state);

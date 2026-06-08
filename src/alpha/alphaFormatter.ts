@@ -295,22 +295,27 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   const rewardShare = config?.estimatedRewardShare ?? 0;
   const minDwellSeconds = config?.rewardMinDwellSeconds ?? 0;
   const now = Date.now();
-  const marketEligibility = new Map<string, { restingContracts: number; minContracts: number }>();
+  const marketEligibility = new Map<number, { restingContracts: number; minContracts: number }>();
   for (const order of rewardEligibleOrders) {
-    const current = marketEligibility.get(order.marketId) ?? { restingContracts: 0, minContracts: order.rewardMinContracts ?? 0 };
+    const current = marketEligibility.get(order.marketAppId) ?? { restingContracts: 0, minContracts: order.rewardMinContracts ?? 0 };
     current.restingContracts += order.remainingShares;
     current.minContracts = Math.max(current.minContracts, order.rewardMinContracts ?? 0);
-    marketEligibility.set(order.marketId, current);
+    marketEligibility.set(order.marketAppId, current);
   }
   const activeRewardOrders = rewardEligibleOrders.filter((order) => {
     const created = Date.parse(order.createdAt);
     const ageSeconds = Number.isFinite(created) ? Math.max(0, (now - created) / 1000) : 0;
-    const eligibility = marketEligibility.get(order.marketId);
+    const eligibility = marketEligibility.get(order.marketAppId);
     return ageSeconds >= minDwellSeconds && (eligibility?.restingContracts ?? 0) >= (eligibility?.minContracts ?? 0);
   });
   const activeRewardBids = activeRewardOrders.filter((order) => order.side === "bid");
-  const rewardRateDaily = (orders: typeof rewardEligibleOrders) =>
-    orders.reduce((sum, order) => sum + (order.estimatedRewardUsdPerDay ?? 0) * rewardShare, 0);
+  const rewardRateDaily = (orders: typeof rewardEligibleOrders) => {
+    const rewardByMarket = new Map<number, number>();
+    for (const order of orders) {
+      rewardByMarket.set(order.marketAppId, Math.max(rewardByMarket.get(order.marketAppId) ?? 0, order.estimatedRewardUsdPerDay ?? 0));
+    }
+    return [...rewardByMarket.values()].reduce((sum, estimatedRewardUsdPerDay) => sum + estimatedRewardUsdPerDay * rewardShare, 0);
+  };
   const activeRewardRateDailyUsd = rewardRateDaily(activeRewardOrders);
   const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleOrders);
   const underwaterPositions = Object.values(state.positionsByMarket).filter((position) => position.unrealisedPnl < 0);
