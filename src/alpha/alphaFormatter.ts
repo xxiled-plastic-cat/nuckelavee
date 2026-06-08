@@ -196,6 +196,7 @@ export function printRewards(rewardMarkets: AlphaMarket[], candidates: AlphaOppo
   console.log("");
   if (rewardError) console.log(`Reward metadata warning: ${rewardError}`);
   console.log(`Reward markets loaded: ${rewardMarkets.length}`);
+  console.log(`Showing top ${Math.min(candidates.length, 12)} of ${candidates.length} ranked reward candidate(s).`);
   console.log("");
   for (const candidate of candidates.slice(0, 12)) {
     console.log("[LP REWARD CANDIDATE]");

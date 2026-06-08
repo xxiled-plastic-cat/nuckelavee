@@ -76,24 +76,32 @@ function inferCompetition(market: Market | MarketOption): AlphaRewardInfo["compe
   return "unknown";
 }
 
-function toRewardInfo(market: Market | MarketOption): AlphaRewardInfo {
-  const looseMarket = market as Market | MarketOption & Record<string, unknown>;
-  const totalRewardsUsd = normalizeUsd(market.totalRewards);
-  const rewardsPaidOutUsd = normalizeUsd(market.rewardsPaidOut);
+function hasPositiveRewardSignal(market: Market | MarketOption): boolean {
+  const looseMarket = market as (Market | MarketOption) & Record<string, unknown>;
+  return [market.totalRewards, market.rewardsPaidOut, looseMarket.dailyRewards, looseMarket.dailyReward, looseMarket.rewardPerDay].some(
+    (value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+}
+
+function toRewardInfo(market: Market | MarketOption, fallback?: Market): AlphaRewardInfo {
+  const rewardSource = !hasPositiveRewardSignal(market) && fallback && hasPositiveRewardSignal(fallback) ? fallback : market;
+  const looseMarket = rewardSource as (Market | MarketOption) & Record<string, unknown>;
+  const totalRewardsUsd = normalizeUsd(rewardSource.totalRewards);
+  const rewardsPaidOutUsd = normalizeUsd(rewardSource.rewardsPaidOut);
   const remainingRewardsUsd =
     totalRewardsUsd !== undefined && rewardsPaidOutUsd !== undefined
       ? Math.max(0, totalRewardsUsd - rewardsPaidOutUsd)
       : undefined;
   return {
-    isRewardMarket: totalRewardsUsd !== undefined || rewardsPaidOutUsd !== undefined,
+    isRewardMarket: hasPositiveRewardSignal(rewardSource),
     totalRewardsUsd,
     rewardsPaidOutUsd,
     remainingRewardsUsd,
     dailyRewardsUsd: normalizeUsd(looseMarket.dailyRewards ?? looseMarket.dailyReward ?? looseMarket.rewardPerDay ?? looseMarket.totalRewards),
-    lastPayoutUsd: normalizeUsd(market.lastRewardAmount),
-    maxRewardSpreadCents: normalizeRewardSpreadCents(market.rewardsSpreadDistance),
-    minContracts: normalizeContracts(market.rewardsMinContracts),
-    competitionLevel: inferCompetition(market),
+    lastPayoutUsd: normalizeUsd(rewardSource.lastRewardAmount),
+    maxRewardSpreadCents: normalizeRewardSpreadCents(rewardSource.rewardsSpreadDistance),
+    minContracts: normalizeContracts(rewardSource.rewardsMinContracts),
+    competitionLevel: inferCompetition(rewardSource),
   };
 }
 
@@ -145,7 +153,7 @@ function flattenMarket(market: Market): AlphaMarket[] {
         yesPrice: normalizeApiPrice(option.yesProb),
         noPrice: normalizeApiPrice(option.noProb),
         volume: normalizeMarketVolumeUsd(looseOption.volume ?? market.volume),
-        reward: toRewardInfo(option),
+        reward: toRewardInfo(option, market),
         raw: { market, option },
       };
     });
