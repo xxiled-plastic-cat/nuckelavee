@@ -33,7 +33,11 @@ function placePaperOrder(state: AlphaBotState, quote: AlphaQuote): void {
 
 export async function runPaperTick(scan: AlphaScanResult, config: AlphaConfig): Promise<AlphaBotState> {
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
-  accrueEstimatedRewards(state, config);
+  accrueEstimatedRewards(state, config, Date.now(), {
+    markets: [...scan.rewardMarkets, ...scan.markets],
+    orderbooks: scan.orderbooks,
+    walletAddress: config.walletAddress,
+  });
   detectPaperFills(state, scan.orderbooks);
   cancelStalePaperOrders(state);
   updateUnrealisedPnl(state, scan.orderbooks);

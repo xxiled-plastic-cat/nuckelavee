@@ -1,6 +1,7 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaBotState, AlphaMarket, AlphaOpportunity, AlphaOrderbook, AlphaParityPlan } from "./alphaTypes.js";
 import { summarizeBooks, type AlphaScanResult } from "./alphaMarketScanner.js";
+import { estimateRewardRateForOrders, type RewardRateContext } from "./rewardRateEstimator.js";
 
 export function fmtUsd(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "unknown";
@@ -13,6 +14,11 @@ export function fmtRewardUsd(value: number | undefined): string {
   const sign = value > 0 ? "+" : "";
   const decimals = Math.abs(value) < 0.01 ? 6 : 2;
   return `${sign}$${value.toFixed(decimals)}`;
+}
+
+function fmtPercent(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 export function fmtPrice(value: number | undefined): string {
@@ -248,7 +254,11 @@ export function printPaperWatch(state: AlphaBotState): void {
   );
 }
 
-export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaConfig, "estimatedRewardShare" | "rewardMinDwellSeconds">): {
+export function summarizeLiveExposure(
+  state: AlphaBotState,
+  config?: Pick<AlphaConfig, "rewardMinDwellSeconds" | "walletAddress">,
+  rewardContext: RewardRateContext = {},
+): {
   openOrders: number;
   bidOrders: number;
   exitOrders: number;
@@ -271,10 +281,12 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
   rewardEligibleLiquidityUsd: number;
   activeRewardBidOrders: number;
   activeRewardOrders: number;
-  activeRewardRateDailyUsd: number;
-  activeRewardRateHourlyUsd: number;
-  potentialRewardRateDailyUsd: number;
-  potentialRewardRateHourlyUsd: number;
+  activeRewardLiquidityShare?: number;
+  potentialRewardLiquidityShare?: number;
+  activeRewardRateDailyUsd?: number;
+  activeRewardRateHourlyUsd?: number;
+  potentialRewardRateDailyUsd?: number;
+  potentialRewardRateHourlyUsd?: number;
 } {
   const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
   const bids = open.filter((order) => order.side === "bid");
@@ -292,7 +304,6 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
     return sum + (order.price - (averageCost ?? 0)) * order.remainingShares;
   }, 0);
-  const rewardShare = config?.estimatedRewardShare ?? 0;
   const minDwellSeconds = config?.rewardMinDwellSeconds ?? 0;
   const now = Date.now();
   const marketEligibility = new Map<number, { restingContracts: number; minContracts: number }>();
@@ -309,15 +320,9 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     return ageSeconds >= minDwellSeconds && (eligibility?.restingContracts ?? 0) >= (eligibility?.minContracts ?? 0);
   });
   const activeRewardBids = activeRewardOrders.filter((order) => order.side === "bid");
-  const rewardRateDaily = (orders: typeof rewardEligibleOrders) => {
-    const rewardByMarket = new Map<number, number>();
-    for (const order of orders) {
-      rewardByMarket.set(order.marketAppId, Math.max(rewardByMarket.get(order.marketAppId) ?? 0, order.estimatedRewardUsdPerDay ?? 0));
-    }
-    return [...rewardByMarket.values()].reduce((sum, estimatedRewardUsdPerDay) => sum + estimatedRewardUsdPerDay * rewardShare, 0);
-  };
-  const activeRewardRateDailyUsd = rewardRateDaily(activeRewardOrders);
-  const potentialRewardRateDailyUsd = rewardRateDaily(rewardEligibleOrders);
+  const rewardRateContext = { ...rewardContext, walletAddress: rewardContext.walletAddress ?? config?.walletAddress };
+  const activeRewardRate = estimateRewardRateForOrders(activeRewardOrders, rewardRateContext);
+  const potentialRewardRate = estimateRewardRateForOrders(rewardEligibleOrders, rewardRateContext);
   const underwaterPositions = Object.values(state.positionsByMarket).filter((position) => position.unrealisedPnl < 0);
 
   return {
@@ -346,15 +351,23 @@ export function summarizeLiveExposure(state: AlphaBotState, config?: Pick<AlphaC
     rewardEligibleLiquidityUsd: rewardEligibleOrders.reduce((sum, order) => sum + order.price * order.remainingShares, 0),
     activeRewardBidOrders: activeRewardBids.length,
     activeRewardOrders: activeRewardOrders.length,
-    activeRewardRateDailyUsd,
-    activeRewardRateHourlyUsd: activeRewardRateDailyUsd / 24,
-    potentialRewardRateDailyUsd,
-    potentialRewardRateHourlyUsd: potentialRewardRateDailyUsd / 24,
+    activeRewardLiquidityShare: activeRewardRate.liquidityShare,
+    potentialRewardLiquidityShare: potentialRewardRate.liquidityShare,
+    activeRewardRateDailyUsd: activeRewardRate.dailyUsd,
+    activeRewardRateHourlyUsd: activeRewardRate.hourlyUsd,
+    potentialRewardRateDailyUsd: potentialRewardRate.dailyUsd,
+    potentialRewardRateHourlyUsd: potentialRewardRate.hourlyUsd,
   };
 }
 
-export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: number, walletAlgoBalance?: number, config?: AlphaConfig): void {
-  const exposure = summarizeLiveExposure(state, config);
+export function printLiveSummary(
+  state: AlphaBotState,
+  walletUsdcBalanceUsd?: number,
+  walletAlgoBalance?: number,
+  config?: AlphaConfig,
+  rewardContext: RewardRateContext = {},
+): void {
+  const exposure = summarizeLiveExposure(state, config, rewardContext);
   console.log("");
   console.log(`[${new Date().toISOString().slice(11, 19)}] liveSummary`);
   console.log(`  walletUsdc: ${fmtUsd(walletUsdcBalanceUsd)}`);
@@ -385,6 +398,8 @@ export function printLiveSummary(state: AlphaBotState, walletUsdcBalanceUsd?: nu
     } active order(s), ${exposure.activeRewardBidOrders} active bid(s))`,
   );
   console.log(`  potentialRewardRate: ${fmtRewardUsd(exposure.potentialRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour)`);
+  console.log(`  activeRewardLiquidityShare: ${fmtPercent(exposure.activeRewardLiquidityShare)}`);
+  console.log(`  potentialRewardLiquidityShare: ${fmtPercent(exposure.potentialRewardLiquidityShare)}`);
   console.log(`  spreadPnl: ${fmtUsd(state.strategyStats.spreadRealisedPnl)}`);
   console.log(`  spreadFills: ${state.strategyStats.spreadEntryFills}/${state.strategyStats.spreadExitFills}`);
   console.log(`  parityPnl: ${fmtUsd(state.strategyStats.parityGrossPnl)}`);

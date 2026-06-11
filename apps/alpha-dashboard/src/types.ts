@@ -69,8 +69,12 @@ export type DashboardSnapshot = {
     realisedPlusOpenExitPnlUsd: number;
     underwaterInventoryNotionalUsd: number;
     underwaterInventoryUnrealisedLossUsd: number;
-    activeRewardRateDailyUsd: number;
-    potentialRewardRateDailyUsd: number;
+    activeRewardLiquidityShare?: number;
+    potentialRewardLiquidityShare?: number;
+    activeRewardRateDailyUsd?: number;
+    activeRewardRateHourlyUsd?: number;
+    potentialRewardRateDailyUsd?: number;
+    potentialRewardRateHourlyUsd?: number;
     realisedPnl: number;
     unrealisedPnl: number;
     tradingPnl: number;

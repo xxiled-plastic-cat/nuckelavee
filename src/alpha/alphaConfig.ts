@@ -92,7 +92,6 @@ export type AlphaConfig = {
   walletMnemonic?: string;
   stateKey: string;
   eventLogPath: string;
-  estimatedRewardShare: number;
 };
 
 function readNumber(key: string, fallback: number): number {
@@ -223,7 +222,6 @@ export function readAlphaConfig(): AlphaConfig {
     walletMnemonic,
     stateKey: process.env.ALPHA_STATE_KEY || "alpha",
     eventLogPath: process.env.ALPHA_EVENT_LOG_PATH || "logs/alpha-paper-events.jsonl",
-    estimatedRewardShare: readNumber("ALPHA_ESTIMATED_REWARD_SHARE", 0.01),
   };
 }
 

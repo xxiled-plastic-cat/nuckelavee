@@ -3,7 +3,7 @@ import algosdk from "algosdk";
 
 import { readAlphaConfig } from "./alphaConfig.js";
 import { AlphaSdkClient } from "./alphaClient.js";
-import { loadAlphaScan } from "./alphaMarketScanner.js";
+import { loadAlphaScan, type AlphaScanResult } from "./alphaMarketScanner.js";
 import { rankRewardCandidates } from "./alphaRewardScanner.js";
 import { scanParity } from "./alphaParityScanner.js";
 import { saveAlphaState } from "./alphaStateStore.js";
@@ -17,6 +17,7 @@ import {
   summarizeLiveExposure,
 } from "./alphaFormatter.js";
 import type { AlphaBotState } from "./alphaTypes.js";
+import type { RewardRateContext } from "./rewardRateEstimator.js";
 import { runPaperTick, loadPaperReport } from "./paperTrader.js";
 import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
@@ -70,6 +71,14 @@ async function buildScan(liveSigner = false) {
   logStartupDebug(`buildScan parity scan complete opportunities=${parity.length}`);
   logStartupDebug(`buildScan end elapsed_ms=${Date.now() - startedAt}`);
   return { config, client, scan, rewardCandidates, parity };
+}
+
+function rewardContextFromScan(scan: AlphaScanResult, walletAddress?: string): RewardRateContext {
+  return {
+    markets: [...scan.rewardMarkets, ...scan.markets],
+    orderbooks: scan.orderbooks,
+    walletAddress,
+  };
 }
 
 async function runScanCommand(): Promise<void> {
@@ -328,9 +337,10 @@ function buildTickDigestMessage(result: {
   walletUsdcBalanceUsd?: number;
   walletAlgoBalance?: number;
   config: ReturnType<typeof readAlphaConfig>;
+  scan: AlphaScanResult;
 }): string {
   const actionSummary = summarizeTickActions(result.actions);
-  const exposure = summarizeLiveExposure(result.state, result.config);
+  const exposure = summarizeLiveExposure(result.state, result.config, rewardContextFromScan(result.scan, result.config.walletAddress));
   const tickAt = new Date().toISOString();
 
   return [
@@ -351,9 +361,15 @@ function buildTickDigestMessage(result: {
     )} underwater_inventory_unrealised_loss=${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`,
     `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)} realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
-    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day potential_reward_rate=${formatRewardUsd(
+    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour active_reward_rate_daily=${formatRewardUsd(
+      exposure.activeRewardRateDailyUsd,
+    )}/day potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour potential_reward_rate_daily=${formatRewardUsd(
       exposure.potentialRewardRateDailyUsd,
-    )}/day active_reward_orders=${exposure.activeRewardOrders} est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
+    )}/day active_reward_orders=${exposure.activeRewardOrders} active_reward_liquidity_share=${formatPercent(
+      exposure.activeRewardLiquidityShare,
+    )} potential_reward_liquidity_share=${formatPercent(
+      exposure.potentialRewardLiquidityShare,
+    )} est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
     `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
@@ -386,6 +402,11 @@ function formatRewardUsd(value: number | undefined): string {
   return `$${value.toFixed(decimals)}`;
 }
 
+function formatPercent(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  return `${(value * 100).toFixed(2)}%`;
+}
+
 function shouldSendDailySummary(state: AlphaBotState): boolean {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -400,8 +421,9 @@ function buildDailySummaryMessage(
   walletUsdcBalanceUsd?: number,
   walletAlgoBalance?: number,
   config?: ReturnType<typeof readAlphaConfig>,
+  scan?: AlphaScanResult,
 ): string {
-  const exposure = summarizeLiveExposure(state, config);
+  const exposure = summarizeLiveExposure(state, config, scan && config ? rewardContextFromScan(scan, config.walletAddress) : {});
   const date = new Date().toISOString().slice(0, 10);
   return [
     `Daily summary ${date}`,
@@ -425,9 +447,13 @@ function buildDailySummaryMessage(
     `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
     `realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
     `trading_pnl=${formatUsd(state.totalPnl)}`,
-    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day`,
+    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour`,
+    `active_reward_rate_daily=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day`,
     `active_reward_orders=${exposure.activeRewardOrders}`,
-    `potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day`,
+    `potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour`,
+    `potential_reward_rate_daily=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day`,
+    `active_reward_liquidity_share=${formatPercent(exposure.activeRewardLiquidityShare)}`,
+    `potential_reward_liquidity_share=${formatPercent(exposure.potentialRewardLiquidityShare)}`,
     `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)}`,
     `parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
     `est_rewards_accrued=${formatRewardUsd(state.estimatedRewardsUsd)}`,
@@ -458,11 +484,11 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
     );
   }
   if (mode === "live") {
-    const digest = buildTickDigestMessage({ ...result, config });
+    const digest = buildTickDigestMessage({ ...result, config, scan });
     await notifyTelegram(digest);
   }
   if (mode === "live" && shouldSendDailySummary(result.state)) {
-    const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config);
+    const dailySummary = buildDailySummaryMessage(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config, scan);
     const sent = await notifyTelegram(dailySummary);
     if (sent) {
       result.state.notificationState ??= {};
@@ -476,7 +502,7 @@ async function runLiveCommand(mode: "live-dry-run" | "live"): Promise<void> {
     console.log(`[${action.kind.toUpperCase()}] ${action.message}`);
   }
   if (result.actions.length === 0) console.log("No actions.");
-  printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config);
+  printLiveSummary(result.state, result.walletUsdcBalanceUsd, result.walletAlgoBalance, config, rewardContextFromScan(scan, config.walletAddress));
   logStartupDebug(`runLiveCommand end mode=${mode} elapsed_ms=${Date.now() - startedAt}`);
 }
 

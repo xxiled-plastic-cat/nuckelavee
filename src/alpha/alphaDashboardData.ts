@@ -4,7 +4,7 @@ import { readAlphaConfig } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits } from "./alphaClient.js";
 import { summarizeLiveExposure } from "./alphaFormatter.js";
 import { loadAlphaState } from "./alphaStateStore.js";
-import type { AlphaBotState, AlphaPaperOrder, AlphaPaperPosition } from "./alphaTypes.js";
+import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaPaperOrder, AlphaPaperPosition } from "./alphaTypes.js";
 
 export type DashboardPositionRow = {
   marketId: string;
@@ -77,8 +77,12 @@ export type AlphaDashboardSnapshot = {
     realisedPlusOpenExitPnlUsd: number;
     underwaterInventoryNotionalUsd: number;
     underwaterInventoryUnrealisedLossUsd: number;
-    activeRewardRateDailyUsd: number;
-    potentialRewardRateDailyUsd: number;
+    activeRewardLiquidityShare?: number;
+    potentialRewardLiquidityShare?: number;
+    activeRewardRateDailyUsd?: number;
+    activeRewardRateHourlyUsd?: number;
+    potentialRewardRateDailyUsd?: number;
+    potentialRewardRateHourlyUsd?: number;
     realisedPnl: number;
     unrealisedPnl: number;
     tradingPnl: number;
@@ -288,7 +292,6 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
   if (cached && Date.now() - cached.fetchedAtMs < ttlMs) return cached.snapshot;
 
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
-  const exposure = summarizeLiveExposure(state, config);
   const errors: string[] = [];
   const sdkClient = new AlphaSdkClient(config, false);
 
@@ -297,9 +300,12 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
   let walletPositions: WalletPosition[] | undefined;
   let walletOrders: OpenOrder[] | undefined;
   let slugByMarketAppId = new Map<number, string>();
+  let marketsByAppId = new Map<number, AlphaMarket>();
+  const rewardOrderbooks = new Map<number, AlphaOrderbook>();
 
   try {
     const markets = await sdkClient.getLiveMarkets();
+    marketsByAppId = new Map(markets.map((market) => [market.marketAppId, market]));
     slugByMarketAppId = new Map(
       markets
         .filter((market) => typeof market.slug === "string" && market.slug.length > 0)
@@ -308,6 +314,27 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
   } catch (error) {
     errors.push(`Live market metadata unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
+
+  const rewardMarketAppIds = new Set(
+    state.openOrders
+      .filter((order) => order.status === "open" && order.runMode === "live" && order.rewardEligible)
+      .map((order) => order.marketAppId),
+  );
+  for (const marketAppId of rewardMarketAppIds) {
+    const market = marketsByAppId.get(marketAppId);
+    if (!market) continue;
+    try {
+      rewardOrderbooks.set(marketAppId, await sdkClient.getOrderbook(market));
+    } catch (error) {
+      errors.push(`Reward orderbook unavailable for ${marketAppId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const exposure = summarizeLiveExposure(state, config, {
+    markets: marketsByAppId,
+    orderbooks: rewardOrderbooks,
+    walletAddress,
+  });
 
   if (walletAddress) {
     try {
@@ -363,8 +390,12 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
       realisedPlusOpenExitPnlUsd: exposure.realisedPlusOpenExitPnlUsd,
       underwaterInventoryNotionalUsd: exposure.underwaterInventoryNotionalUsd,
       underwaterInventoryUnrealisedLossUsd: exposure.underwaterInventoryUnrealisedLossUsd,
+      activeRewardLiquidityShare: exposure.activeRewardLiquidityShare,
+      potentialRewardLiquidityShare: exposure.potentialRewardLiquidityShare,
       activeRewardRateDailyUsd: exposure.activeRewardRateDailyUsd,
+      activeRewardRateHourlyUsd: exposure.activeRewardRateHourlyUsd,
       potentialRewardRateDailyUsd: exposure.potentialRewardRateDailyUsd,
+      potentialRewardRateHourlyUsd: exposure.potentialRewardRateHourlyUsd,
       realisedPnl: state.realisedPnl,
       unrealisedPnl: state.unrealisedPnl,
       tradingPnl: state.totalPnl,

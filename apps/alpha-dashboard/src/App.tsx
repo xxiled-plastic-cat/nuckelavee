@@ -15,6 +15,17 @@ function fmtUsdAmount(value: number | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
+function fmtRewardUsd(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  const decimals = Math.abs(value) < 0.01 ? 6 : 2;
+  return `$${value.toFixed(decimals)}`;
+}
+
+function fmtPercent(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "unknown";
+  return `${(value * 100).toFixed(2)}%`;
+}
+
 function fmtShares(value: number): string {
   return value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
 }
@@ -85,7 +96,13 @@ export default function App() {
       { label: "Position Cost", value: fmtUsdAmount(positionLockedUsd) },
       { label: "Bid Exposure", value: fmtUsd(snapshot.overview.bidExposureUsd) },
       { label: "Open Orders", value: String(snapshot.overview.openOrders) },
-      { label: "Active Reward Rate", value: `${fmtUsd(snapshot.overview.activeRewardRateDailyUsd)}/day` },
+      {
+        label: "Active Reward Rate",
+        value: `${fmtRewardUsd(snapshot.overview.activeRewardRateHourlyUsd)}/hour (${fmtRewardUsd(
+          snapshot.overview.activeRewardRateDailyUsd,
+        )}/day)`,
+      },
+      { label: "Reward Liquidity Share", value: fmtPercent(snapshot.overview.activeRewardLiquidityShare) },
       { label: "Wallet USDC", value: fmtUsd(snapshot.walletBalances.usdc) },
     ];
   }, [snapshot]);

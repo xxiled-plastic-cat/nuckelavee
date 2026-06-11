@@ -853,7 +853,11 @@ export async function runLiveTick(
   } else {
     state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
   }
-  accrueEstimatedRewards(state, config);
+  accrueEstimatedRewards(state, config, Date.now(), {
+    markets: [...scan.rewardMarkets, ...scan.markets],
+    orderbooks: scan.orderbooks,
+    walletAddress: config.walletAddress,
+  });
   updateUnrealisedPnl(state, scan.orderbooks);
   const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
   actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
