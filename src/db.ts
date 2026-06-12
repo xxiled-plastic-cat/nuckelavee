@@ -5,6 +5,16 @@ import * as schema from "../drizzle/schema.js";
 
 let client: postgres.Sql | undefined;
 
+function readCloseTimeoutSeconds(): number {
+  const raw = process.env.DATABASE_CLOSE_TIMEOUT_SECONDS?.trim();
+  if (!raw) return 1;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid DATABASE_CLOSE_TIMEOUT_SECONDS: ${raw}`);
+  }
+  return parsed;
+}
+
 function readPoolMax(): number {
   const raw = process.env.DATABASE_POOL_MAX?.trim();
   if (!raw) return 1;
@@ -32,7 +42,7 @@ export async function closeDatabase(): Promise<void> {
   if (!client) return;
   const activeClient = client;
   client = undefined;
-  await activeClient.end();
+  await activeClient.end({ timeout: readCloseTimeoutSeconds() });
 }
 
 export type Database = ReturnType<typeof getDatabase>;

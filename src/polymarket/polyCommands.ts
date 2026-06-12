@@ -94,8 +94,33 @@ function printUsage(): void {
   console.log("Usage: tsx src/polymarket/polyCommands.ts <scan|rewards|market|paper|paper-watch|paper-report>");
 }
 
+function shouldKeepDatabaseOpen(command: string | undefined): boolean {
+  return command === "paper-watch";
+}
+
+function installShutdownHandlers(command: string | undefined): void {
+  if (shouldKeepDatabaseOpen(command)) return;
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await closeDatabase();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(message);
+      process.exitCode = 1;
+    } finally {
+      process.kill(process.pid, signal);
+    }
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+}
+
 async function main(): Promise<void> {
   const command = process.argv[2];
+  installShutdownHandlers(command);
   if (command === "scan") return runScanCommand();
   if (command === "rewards") return runRewardsCommand();
   if (command === "market") return runMarketCommand(process.argv[3]);
@@ -111,7 +136,7 @@ void main().catch((error) => {
   console.error(message);
   process.exitCode = 1;
 }).finally(async () => {
-  if (process.argv[2] !== "paper-watch") {
+  if (!shouldKeepDatabaseOpen(process.argv[2])) {
     await closeDatabase();
   }
 });

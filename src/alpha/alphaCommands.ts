@@ -49,6 +49,30 @@ function formatError(error: unknown): string {
   return lines.join("\n");
 }
 
+function shouldKeepDatabaseOpen(command: string | undefined): boolean {
+  return command === "watch" || command === "paper-watch";
+}
+
+function installShutdownHandlers(command: string | undefined): void {
+  if (shouldKeepDatabaseOpen(command)) return;
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logStartupDebug(`received ${signal}; closing database`);
+    try {
+      await closeDatabase();
+    } catch (error) {
+      console.error(formatError(error));
+      process.exitCode = 1;
+    } finally {
+      process.kill(process.pid, signal);
+    }
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+}
+
 async function buildScan(liveSigner = false) {
   const startedAt = Date.now();
   logStartupDebug(`buildScan start liveSigner=${liveSigner}`);
@@ -556,6 +580,7 @@ function printUsage(): void {
 
 async function main(): Promise<void> {
   const command = process.argv[2];
+  installShutdownHandlers(command);
   logStartupDebug(
     `main start command=${command ?? "none"} pid=${process.pid} cwd=${process.cwd()} node=${process.version} args=${process.argv.slice(2).join(" ")}`,
   );
@@ -581,7 +606,7 @@ void main().catch((error) => {
   process.exitCode = 1;
 }).finally(async () => {
   logStartupDebug(`main finally command=${process.argv[2] ?? "none"} exitCode=${process.exitCode ?? 0}`);
-  if (process.argv[2] !== "watch" && process.argv[2] !== "paper-watch") {
+  if (!shouldKeepDatabaseOpen(process.argv[2])) {
     await closeDatabase();
   }
 });
