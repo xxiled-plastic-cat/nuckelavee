@@ -42,6 +42,10 @@ function parseOptionalLimit(value: number): number | undefined {
   return normalized;
 }
 
+function shouldPersistMarketStatus(): boolean {
+  return process.env.ALPHA_MARKET_STATUS_PERSISTENCE !== "false";
+}
+
 export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig): Promise<AlphaScanResult> {
   const startedAt = Date.now();
   logStartupDebug(`loadAlphaScan start maxMarketsPerScan=${config.maxMarketsPerScan}`);
@@ -65,23 +69,28 @@ export async function loadAlphaScan(client: AlphaSdkClient, config: AlphaConfig)
     [...rewardMarkets, ...markets, ...fetchedRewardMarkets, ...fetchedMarkets].map((market) => [market.marketAppId, market]),
   );
   const seenMarkets = [...seenMarketsByAppId.values()];
-  let marketStatusStoreAvailable = true;
-  try {
-    const inactiveMarketAppIds = await loadInactiveMarketAppIds(seenMarkets.map((market) => market.marketAppId));
-    if (inactiveMarketAppIds.size > 0) {
-      markets = markets.filter((market) => !inactiveMarketAppIds.has(market.marketAppId));
-      rewardMarkets = rewardMarkets.filter((market) => !inactiveMarketAppIds.has(market.marketAppId));
-      logStartupDebug(
-        `persisted inactive markets filtered count=${inactiveMarketAppIds.size} remaining_live=${markets.length} remaining_reward=${rewardMarkets.length}`,
-      );
-    }
+  const persistMarketStatus = shouldPersistMarketStatus();
+  let marketStatusStoreAvailable = persistMarketStatus;
+  if (persistMarketStatus) {
+    try {
+      const inactiveMarketAppIds = await loadInactiveMarketAppIds(seenMarkets.map((market) => market.marketAppId));
+      if (inactiveMarketAppIds.size > 0) {
+        markets = markets.filter((market) => !inactiveMarketAppIds.has(market.marketAppId));
+        rewardMarkets = rewardMarkets.filter((market) => !inactiveMarketAppIds.has(market.marketAppId));
+        logStartupDebug(
+          `persisted inactive markets filtered count=${inactiveMarketAppIds.size} remaining_live=${markets.length} remaining_reward=${rewardMarkets.length}`,
+        );
+      }
 
-    await upsertAlphaMarketStatus(seenMarkets.map((market) => statusFromMarket(market, seenAt)));
-    logStartupDebug(`market status rows upserted count=${seenMarkets.length}`);
-  } catch (error) {
-    marketStatusStoreAvailable = false;
-    const message = shortError(error);
-    logStartupDebug(`market status store unavailable; proceeding without persisted filtering error=${message}`);
+      await upsertAlphaMarketStatus(seenMarkets.map((market) => statusFromMarket(market, seenAt)));
+      logStartupDebug(`market status rows upserted count=${seenMarkets.length}`);
+    } catch (error) {
+      marketStatusStoreAvailable = false;
+      const message = shortError(error);
+      logStartupDebug(`market status store unavailable; proceeding without persisted filtering error=${message}`);
+    }
+  } else {
+    logStartupDebug("market status persistence disabled");
   }
 
   const rewardByAppId = new Map<number, AlphaMarket>();

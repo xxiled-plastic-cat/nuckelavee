@@ -5,6 +5,19 @@ import * as schema from "../drizzle/schema.js";
 
 let client: postgres.Sql | undefined;
 
+function withPoolMax(connectionString: string, max: number): string {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    throw new Error("Invalid DATABASE_URL");
+  }
+  if (!url.searchParams.has("connection_limit")) {
+    url.searchParams.set("connection_limit", String(max));
+  }
+  return url.toString();
+}
+
 function readCloseTimeoutSeconds(): number {
   const raw = process.env.DATABASE_CLOSE_TIMEOUT_SECONDS?.trim();
   if (!raw) return 1;
@@ -30,9 +43,10 @@ export function getDatabase() {
   if (!connectionString) {
     throw new Error("DATABASE_URL is required for bot state persistence");
   }
-  client ??= postgres(connectionString, {
+  const poolMax = readPoolMax();
+  client ??= postgres(withPoolMax(connectionString, poolMax), {
     prepare: false,
-    max: readPoolMax(),
+    max: poolMax,
     idle_timeout: 5,
   });
   return drizzle(client, { schema });
