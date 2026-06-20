@@ -9,6 +9,7 @@ export type AlphaRewardInfo = {
   rewardsPaidOutUsd?: number;
   remainingRewardsUsd?: number;
   dailyRewardsUsd?: number;
+  dailyRewardsSource?: string;
   lastPayoutUsd?: number;
   maxRewardSpreadCents?: number;
   minContracts?: number;

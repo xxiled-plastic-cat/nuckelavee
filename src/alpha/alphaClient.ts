@@ -90,6 +90,28 @@ function hasPositiveRewardSignal(market: Market | MarketOption): boolean {
   );
 }
 
+/**
+ * Resolve a per-day reward figure, preferring genuine daily fields. The API
+ * does not always expose one; the legacy behaviour fell back to `totalRewards`
+ * (the whole pool) as if it were a daily number, which materially overstates
+ * the reward rate. We still allow that as a last resort but tag the source so
+ * the overstatement is visible, and it can be calibrated out downstream.
+ */
+function resolveDailyReward(looseMarket: Record<string, unknown>): { usd?: number; source: string } {
+  const dailyCandidates: Array<[string, unknown]> = [
+    ["dailyRewards", looseMarket.dailyRewards],
+    ["dailyReward", looseMarket.dailyReward],
+    ["rewardPerDay", looseMarket.rewardPerDay],
+  ];
+  for (const [source, raw] of dailyCandidates) {
+    const usd = normalizeUsd(raw);
+    if (usd !== undefined && usd > 0) return { usd, source };
+  }
+  const poolUsd = normalizeUsd(looseMarket.totalRewards);
+  if (poolUsd !== undefined && poolUsd > 0) return { usd: poolUsd, source: "totalRewards-pool-fallback" };
+  return { source: "none" };
+}
+
 function toRewardInfo(market: Market | MarketOption, fallback?: Market): AlphaRewardInfo {
   const rewardSource = !hasPositiveRewardSignal(market) && fallback && hasPositiveRewardSignal(fallback) ? fallback : market;
   const looseMarket = rewardSource as (Market | MarketOption) & Record<string, unknown>;
@@ -99,12 +121,14 @@ function toRewardInfo(market: Market | MarketOption, fallback?: Market): AlphaRe
     totalRewardsUsd !== undefined && rewardsPaidOutUsd !== undefined
       ? Math.max(0, totalRewardsUsd - rewardsPaidOutUsd)
       : undefined;
+  const dailyReward = resolveDailyReward(looseMarket);
   return {
     isRewardMarket: hasPositiveRewardSignal(rewardSource),
     totalRewardsUsd,
     rewardsPaidOutUsd,
     remainingRewardsUsd,
-    dailyRewardsUsd: normalizeUsd(looseMarket.dailyRewards ?? looseMarket.dailyReward ?? looseMarket.rewardPerDay ?? looseMarket.totalRewards),
+    dailyRewardsUsd: dailyReward.usd,
+    dailyRewardsSource: dailyReward.source,
     lastPayoutUsd: normalizeUsd(rewardSource.lastRewardAmount),
     maxRewardSpreadCents: normalizeRewardSpreadCents(rewardSource.rewardsSpreadDistance),
     minContracts: normalizeContracts(rewardSource.rewardsMinContracts),

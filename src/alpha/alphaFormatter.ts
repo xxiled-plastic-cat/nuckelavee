@@ -202,6 +202,15 @@ export function printRewards(rewardMarkets: AlphaMarket[], candidates: AlphaOppo
   console.log("");
   if (rewardError) console.log(`Reward metadata warning: ${rewardError}`);
   console.log(`Reward markets loaded: ${rewardMarkets.length}`);
+  const sourceCounts = new Map<string, number>();
+  for (const market of rewardMarkets) {
+    const source = market.reward.dailyRewardsSource ?? "unknown";
+    sourceCounts.set(source, (sourceCounts.get(source) ?? 0) + 1);
+  }
+  if (sourceCounts.size > 0) {
+    const breakdown = [...sourceCounts.entries()].map(([source, count]) => `${source}=${count}`).join(", ");
+    console.log(`Daily-reward source breakdown: ${breakdown}`);
+  }
   console.log(`Showing top ${Math.min(candidates.length, 12)} of ${candidates.length} ranked reward candidate(s).`);
   console.log("");
   for (const candidate of candidates.slice(0, 12)) {
@@ -229,7 +238,7 @@ export function printMarketDetail(market: AlphaMarket, book: AlphaOrderbook | un
   console.log(`Close: ${market.closeTime ?? "unknown"}`);
   console.log("");
   console.log(`LP rewards: ${market.reward.isRewardMarket ? "yes" : "no"}`);
-  console.log(`Daily rewards: ${fmtUsd(market.reward.dailyRewardsUsd)}`);
+  console.log(`Daily rewards: ${fmtUsd(market.reward.dailyRewardsUsd)} (source: ${market.reward.dailyRewardsSource ?? "unknown"})`);
   console.log(`Max reward spread: ${market.reward.maxRewardSpreadCents?.toFixed(2) ?? "unknown"}c`);
   console.log(`Min aggregate reward size: ${market.reward.minContracts?.toFixed(6) ?? "unknown"} contracts`);
   console.log(`Competition: ${market.reward.competitionLevel ?? "unknown"}`);
@@ -256,7 +265,7 @@ export function printPaperWatch(state: AlphaBotState): void {
 
 export function summarizeLiveExposure(
   state: AlphaBotState,
-  config?: Pick<AlphaConfig, "rewardMinDwellSeconds" | "walletAddress">,
+  config?: Pick<AlphaConfig, "rewardMinDwellSeconds" | "walletAddress" | "rewardRateCalibration">,
   rewardContext: RewardRateContext = {},
 ): {
   openOrders: number;
@@ -322,7 +331,11 @@ export function summarizeLiveExposure(
     return ageSeconds >= minDwellSeconds && (eligibility?.restingContracts ?? 0) >= (eligibility?.minContracts ?? 0);
   });
   const activeRewardBids = activeRewardOrders.filter((order) => order.side === "bid");
-  const rewardRateContext = { ...rewardContext, walletAddress: rewardContext.walletAddress ?? config?.walletAddress };
+  const rewardRateContext = {
+    ...rewardContext,
+    walletAddress: rewardContext.walletAddress ?? config?.walletAddress,
+    calibration: config?.rewardRateCalibration ?? rewardContext.calibration,
+  };
   const activeRewardRate = estimateRewardRateForOrders(activeRewardOrders, rewardRateContext);
   const potentialRewardRate = estimateRewardRateForOrders(rewardEligibleOrders, rewardRateContext);
   const heldPositions = Object.values(state.positionsByMarket).filter(

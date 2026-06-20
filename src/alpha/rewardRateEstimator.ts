@@ -10,6 +10,12 @@ export type RewardRateContext = {
   markets?: Iterable<AlphaMarket> | Map<number, AlphaMarket>;
   orderbooks?: Map<number, AlphaOrderbook>;
   walletAddress?: string;
+  /**
+   * Empirical multiplier applied to the estimated reward $ rate (not the
+   * liquidity share) so the projection can be aligned to measured payouts.
+   * Defaults to 1 (no adjustment).
+   */
+  calibration?: number;
 };
 
 export type RewardRateEstimate = {
@@ -172,9 +178,11 @@ export function estimateRewardRateForOrders(orders: AlphaPaperOrder[], context: 
     };
   }
 
+  const calibration = context.calibration !== undefined && context.calibration > 0 ? context.calibration : 1;
+  const calibratedDailyUsd = dailyUsd * calibration;
   return {
-    dailyUsd,
-    hourlyUsd: dailyUsd / 24,
+    dailyUsd: calibratedDailyUsd,
+    hourlyUsd: calibratedDailyUsd / 24,
     liquidityShare: rewardWeight > 0 ? rewardWeightedShare / rewardWeight : 0,
     ownContracts,
     totalEligibleContracts,

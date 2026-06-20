@@ -69,6 +69,7 @@ export type AlphaConfig = {
   inventoryMergeMinShares: number;
   enableResolvedClaim: boolean;
   maxInventoryNotionalUsd: number;
+  rewardRateCalibration: number;
   maxSpreadMidpoint: number;
   spreadMaxMarketExposureUsd: number;
   spreadMaxTotalExposureUsd: number;
@@ -199,6 +200,7 @@ export function readAlphaConfig(): AlphaConfig {
     inventoryMergeMinShares: readNumber("ALPHA_INVENTORY_MERGE_MIN_SHARES", 1),
     enableResolvedClaim: readBool("ALPHA_ENABLE_RESOLVED_CLAIM", true),
     maxInventoryNotionalUsd: readNumber("ALPHA_MAX_INVENTORY_NOTIONAL_USD", 0),
+    rewardRateCalibration: readNumber("ALPHA_REWARD_RATE_CALIBRATION", 1),
     maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),
     spreadMaxMarketExposureUsd: readNumber(
       "ALPHA_SPREAD_MAX_MARKET_EXPOSURE_USD",

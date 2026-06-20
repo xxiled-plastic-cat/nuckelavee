@@ -28,6 +28,7 @@ export function accrueEstimatedRewards(state: AlphaBotState, config: AlphaConfig
     const rewardRate = estimateRewardRateForOrders(marketOrders, {
       ...rewardContext,
       walletAddress: rewardContext.walletAddress ?? config.walletAddress,
+      calibration: config.rewardRateCalibration ?? rewardContext.calibration,
     });
     if (rewardRate.dailyUsd === undefined || rewardRate.dailyUsd <= 0) continue;
     const estimate = rewardRate.dailyUsd * (elapsedSeconds / 86_400);
