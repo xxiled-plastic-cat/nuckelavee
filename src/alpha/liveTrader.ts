@@ -7,6 +7,8 @@ import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPap
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
 import { generateQuotes } from "./quoteEngine.js";
 import { runParityLane } from "./parityTrader.js";
+import { runInventoryMergeLane } from "./inventoryMerger.js";
+import { runResolvedClaimLane } from "./resolvedClaimLane.js";
 import { updateUnrealisedPnl } from "./pnlTracker.js";
 import { accrueEstimatedRewards } from "./rewardTracker.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
@@ -14,7 +16,7 @@ import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
 
 export type LiveAction = {
-  kind: "place" | "cancel" | "skip" | "parity";
+  kind: "place" | "cancel" | "skip" | "parity" | "merge" | "claim";
   message: string;
 };
 
@@ -446,6 +448,21 @@ function controlledUnderwaterExitStatus(
     };
   }
   const lossCents = Math.max(0, (averageCost - ask) * 100);
+  // Stale positions get a market-clearing tier: bypass the normal per-quote
+  // loss/notional/market-loss caps and only enforce the wider stale loss cap.
+  const isStale = (ageSeconds ?? 0) >= config.staleInventoryAgeHours * 3600;
+  if (isStale) {
+    if (lossCents > config.staleInventoryMaxLossCents) {
+      return {
+        allowed: false,
+        reason: `stale loss ${lossCents.toFixed(2)}c exceeds stale cap ${config.staleInventoryMaxLossCents.toFixed(2)}c`,
+      };
+    }
+    return {
+      allowed: true,
+      reason: `stale inventory liquidation; age=${((ageSeconds ?? 0) / 3600).toFixed(1)}h loss ${lossCents.toFixed(2)}c`,
+    };
+  }
   if (lossCents > config.underwaterExitMaxLossCents) {
     return { allowed: false, reason: `loss ${lossCents.toFixed(2)}c exceeds cap ${config.underwaterExitMaxLossCents.toFixed(2)}c` };
   }
@@ -836,9 +853,11 @@ export async function runLiveTick(
   const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
   let walletPositions: PositionSnapshot = {};
+  let rawWalletPositions: WalletPosition[] = [];
   let positionsSynced = false;
   try {
     const positions = await liveClient.getPositions(config.walletAddress);
+    rawWalletPositions = positions;
     walletPositions = walletPositionSnapshot(positions, marketByAppId);
     positionsSynced = true;
     const syncedPositions = mergeLivePositionsFromWallet(state, positions, marketByAppId);
@@ -852,6 +871,14 @@ export async function runLiveTick(
     inferClosedLiveOrders(state, closedOrders, beforePositions, walletPositions, actions);
   } else {
     state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
+  }
+  if (positionsSynced && rawWalletPositions.length > 0) {
+    actions.push(
+      ...(await runInventoryMergeLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
+    );
+    actions.push(
+      ...(await runResolvedClaimLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
+    );
   }
   accrueEstimatedRewards(state, config, Date.now(), {
     markets: [...scan.rewardMarkets, ...scan.markets],
@@ -1053,6 +1080,20 @@ export async function runLiveTick(
   ).length;
   const rewardQueueCap = Math.max(0, config.rewardMaxLiveOpenOrders - openRewardOrders);
   const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadOrders);
+  const heldInventoryNotionalUsd = Object.values(state.positionsByMarket).reduce(
+    (sum, position) => sum + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost,
+    0,
+  );
+  const inventoryGovernorActive =
+    config.maxInventoryNotionalUsd > 0 && heldInventoryNotionalUsd >= config.maxInventoryNotionalUsd;
+  if (inventoryGovernorActive) {
+    actions.push({
+      kind: "skip",
+      message: `Inventory governor active: held inventory $${heldInventoryNotionalUsd.toFixed(
+        2,
+      )} >= ceiling $${config.maxInventoryNotionalUsd.toFixed(2)}; pausing new reward/spread bid entries (exits, merges, and claims still run)`,
+    });
+  }
   const pendingExitSlots = Math.min(config.spreadExitSlotReserve, laneQueues.exits.length, spreadQueueCap);
   if (pendingExitSlots > 0) {
     actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} spread lane slot(s) for inventory exits` });
@@ -1085,11 +1126,13 @@ export async function runLiveTick(
   for (const exit of laneQueues.exits.slice(0, pendingExitSlots)) {
     if (!pushQuote(exit)) break;
   }
-  for (const reward of laneQueues.reward) {
-    pushQuote(reward);
-  }
-  for (const spread of laneQueues.spread) {
-    pushQuote(spread);
+  if (!inventoryGovernorActive) {
+    for (const reward of laneQueues.reward) {
+      pushQuote(reward);
+    }
+    for (const spread of laneQueues.spread) {
+      pushQuote(spread);
+    }
   }
   for (const exit of laneQueues.exits.slice(pendingExitSlots)) {
     pushQuote(exit);

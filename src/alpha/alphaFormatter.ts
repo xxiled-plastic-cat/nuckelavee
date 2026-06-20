@@ -262,6 +262,8 @@ export function summarizeLiveExposure(
   openOrders: number;
   bidOrders: number;
   exitOrders: number;
+  openPositions: number;
+  underwaterPositions: number;
   bidExposureUsd: number;
   rewardBidOrders: number;
   rewardBidExposureUsd: number;
@@ -323,12 +325,17 @@ export function summarizeLiveExposure(
   const rewardRateContext = { ...rewardContext, walletAddress: rewardContext.walletAddress ?? config?.walletAddress };
   const activeRewardRate = estimateRewardRateForOrders(activeRewardOrders, rewardRateContext);
   const potentialRewardRate = estimateRewardRateForOrders(rewardEligibleOrders, rewardRateContext);
-  const underwaterPositions = Object.values(state.positionsByMarket).filter((position) => position.unrealisedPnl < 0);
+  const heldPositions = Object.values(state.positionsByMarket).filter(
+    (position) => position.yesShares > 1e-6 || position.noShares > 1e-6,
+  );
+  const underwaterPositions = heldPositions.filter((position) => position.unrealisedPnl < 0);
 
   return {
     openOrders: open.length,
     bidOrders: bids.length,
     exitOrders: exits.length,
+    openPositions: heldPositions.length,
+    underwaterPositions: underwaterPositions.length,
     bidExposureUsd: bidExposure(bids),
     rewardBidOrders: rewardBids.length,
     rewardBidExposureUsd: bidExposure(rewardBids),
@@ -368,46 +375,50 @@ export function printLiveSummary(
   rewardContext: RewardRateContext = {},
 ): void {
   const exposure = summarizeLiveExposure(state, config, rewardContext);
+  const walletAlgo = walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6);
   console.log("");
   console.log(`[${new Date().toISOString().slice(11, 19)}] liveSummary`);
-  console.log(`  walletUsdc: ${fmtUsd(walletUsdcBalanceUsd)}`);
-  console.log(`  walletAlgo: ${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`);
-  console.log(`  openOrders: ${exposure.openOrders}`);
-  console.log(`  bidOrders: ${exposure.bidOrders}`);
-  console.log(`  exitOrders: ${exposure.exitOrders}`);
-  console.log(`  bidExposure: ${fmtUsd(exposure.bidExposureUsd)}`);
-  console.log(`  rewardBidExposure: ${fmtUsd(exposure.rewardBidExposureUsd)} (${exposure.rewardBidOrders} order(s))`);
-  console.log(`  rewardEligibleBidExposure: ${fmtUsd(exposure.rewardEligibleBidExposureUsd)} (${exposure.rewardEligibleBidOrders} order(s))`);
-  console.log(`  rewardEligibleLiquidity: ${fmtUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} order(s), bid+ask)`);
-  console.log(`  spreadBidExposure: ${fmtUsd(exposure.spreadBidExposureUsd)} (${exposure.spreadBidOrders} order(s))`);
-  console.log(`  exitNotional: ${fmtUsd(exposure.exitNotionalUsd)} (${exposure.exitOrders} order(s), not counted as exposure)`);
-  console.log(`  controlledExitNotional: ${fmtUsd(exposure.controlledExitNotionalUsd)} (subset of exit notional)`);
-  console.log(`  exitPnlIfFilled: ${fmtUsd(exposure.exitPnlIfFilledUsd)}`);
-  console.log(`  realisedPlusOpenExitPnl: ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`);
-  console.log(`  underwaterInventoryNotional: ${fmtUsd(exposure.underwaterInventoryNotionalUsd)}`);
-  console.log(`  underwaterInventoryUnrealisedLoss: ${fmtUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`);
+  console.log(`  wallet: ${fmtUsd(walletUsdcBalanceUsd)} USDC | ${walletAlgo} ALGO`);
   console.log(
-    `  rewardEligibleExitNotional: ${fmtUsd(exposure.rewardEligibleExitNotionalUsd)} (${exposure.rewardEligibleExitOrders} order(s), not counted as exposure)`,
+    `  orders: ${exposure.openOrders} open (${exposure.bidOrders} bid, ${exposure.exitOrders} exit) | positions: ${exposure.openPositions} (${exposure.underwaterPositions} underwater)`,
   );
-  console.log(`  realisedPnl: ${fmtUsd(state.realisedPnl)}`);
-  console.log(`  unrealisedPnl: ${fmtUsd(state.unrealisedPnl)}`);
-  console.log(`  tradingPnl: ${fmtUsd(state.totalPnl)}`);
   console.log(
-    `  activeRewardRate: ${fmtRewardUsd(exposure.activeRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour, ${
-      exposure.activeRewardOrders
-    } active order(s), ${exposure.activeRewardBidOrders} active bid(s))`,
+    `  bidExposure: ${fmtUsd(exposure.bidExposureUsd)} (reward ${fmtUsd(exposure.rewardBidExposureUsd)}, eligible ${fmtUsd(
+      exposure.rewardEligibleBidExposureUsd,
+    )}, spread ${fmtUsd(exposure.spreadBidExposureUsd)})`,
   );
-  console.log(`  potentialRewardRate: ${fmtRewardUsd(exposure.potentialRewardRateDailyUsd)}/day (${fmtRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour)`);
-  console.log(`  activeRewardLiquidityShare: ${fmtPercent(exposure.activeRewardLiquidityShare)}`);
-  console.log(`  potentialRewardLiquidityShare: ${fmtPercent(exposure.potentialRewardLiquidityShare)}`);
-  console.log(`  spreadPnl: ${fmtUsd(state.strategyStats.spreadRealisedPnl)}`);
-  console.log(`  spreadFills: ${state.strategyStats.spreadEntryFills}/${state.strategyStats.spreadExitFills}`);
-  console.log(`  parityPnl: ${fmtUsd(state.strategyStats.parityGrossPnl)}`);
-  console.log(`  parityTrades: ${state.strategyStats.parityTradesExecuted}`);
-  console.log(`  parityFailed: ${state.strategyStats.parityFailedLegs}`);
-  console.log(`  estRewardsAccrued: ${fmtRewardUsd(state.estimatedRewardsUsd)}`);
-  console.log(`  livePlaced: ${state.strategyStats.liveOrdersPlaced}`);
-  console.log(`  liveCancelled: ${state.strategyStats.liveOrdersCancelled}`);
+  console.log(
+    `  exitNotional: ${fmtUsd(exposure.exitNotionalUsd)} (controlled ${fmtUsd(exposure.controlledExitNotionalUsd)}, eligible ${fmtUsd(
+      exposure.rewardEligibleExitNotionalUsd,
+    )}; not counted as exposure)`,
+  );
+  console.log(
+    `  underwaterInventory: notional ${fmtUsd(exposure.underwaterInventoryNotionalUsd)} | unrealisedLoss ${fmtUsd(
+      exposure.underwaterInventoryUnrealisedLossUsd,
+    )}`,
+  );
+  console.log(
+    `  pnl: realised ${fmtUsd(state.realisedPnl)} | unrealised ${fmtUsd(state.unrealisedPnl)} | trading ${fmtUsd(
+      state.totalPnl,
+    )} | exitIfFilled ${fmtUsd(exposure.exitPnlIfFilledUsd)} | realised+openExit ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
+  );
+  console.log(
+    `  rewards: eligibleLiquidity ${fmtUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) | active ${fmtRewardUsd(
+      exposure.activeRewardRateDailyUsd,
+    )}/day (${exposure.activeRewardOrders} ord) | potential ${fmtRewardUsd(
+      exposure.potentialRewardRateDailyUsd,
+    )}/day | share ${fmtPercent(exposure.activeRewardLiquidityShare)}/${fmtPercent(
+      exposure.potentialRewardLiquidityShare,
+    )} | accrued ${fmtRewardUsd(state.estimatedRewardsUsd)}`,
+  );
+  console.log(
+    `  spread: pnl ${fmtUsd(state.strategyStats.spreadRealisedPnl)} fills ${state.strategyStats.spreadEntryFills}/${
+      state.strategyStats.spreadExitFills
+    } | parity: pnl ${fmtUsd(state.strategyStats.parityGrossPnl)} trades ${state.strategyStats.parityTradesExecuted} failed ${
+      state.strategyStats.parityFailedLegs
+    }`,
+  );
+  console.log(`  lifetime: placed ${state.strategyStats.liveOrdersPlaced} | cancelled ${state.strategyStats.liveOrdersCancelled}`);
 }
 
 export function printPaperReport(state: AlphaBotState): void {

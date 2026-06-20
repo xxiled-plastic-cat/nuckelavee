@@ -240,7 +240,30 @@ export async function runResolvedAssetCleanup(options: CleanupOptions): Promise<
   let successfulCloseOuts = 0;
 
   if (options.execute) {
+    const claimClient = new AlphaSdkClient(config, true);
     for (const holding of limitedHoldings) {
+      // Non-zero balances are redeemed via claim: winning tokens return USDC,
+      // losing tokens burn, and the ASA opt-in is closed in the same group.
+      if (holding.amount > 0n) {
+        try {
+          const result = await claimClient.claim({
+            marketAppId: holding.market.marketAppId,
+            assetId: holding.assetId,
+          });
+          successfulCloseOuts += 1;
+          console.log(
+            `  claimed asset=${holding.assetId} market_app=${holding.market.marketAppId} txids=${result.txIds.join(",")}`,
+          );
+          continue;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(
+            `  claim failed asset=${holding.assetId} market_app=${holding.market.marketAppId}: ${message}; falling back to close-out`,
+          );
+        }
+      }
+      // Zero-balance opt-ins (or claim fallback) close the ASA back to the
+      // market creator to reclaim the Algorand minimum balance.
       const suggestedParams = await algod.getTransactionParams().do();
       const closeTxn = algosdk.makeAssetTransferTxnWithSuggestedParamsFromObject({
         sender: walletAddress,

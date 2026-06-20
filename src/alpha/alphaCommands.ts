@@ -310,6 +310,7 @@ function summarizeTickActions(actions: LiveAction[]): {
   inferredEntryFills: string[];
   inferredExitFills: string[];
   parityEvents: string[];
+  recycleEvents: string[];
   warnings: string[];
 } {
   const summary = {
@@ -318,6 +319,7 @@ function summarizeTickActions(actions: LiveAction[]): {
     inferredEntryFills: [] as string[],
     inferredExitFills: [] as string[],
     parityEvents: [] as string[],
+    recycleEvents: [] as string[],
     warnings: [] as string[],
   };
 
@@ -328,6 +330,10 @@ function summarizeTickActions(actions: LiveAction[]): {
     }
     if (action.kind === "cancel") {
       summary.cancelled.push(action.message);
+      continue;
+    }
+    if (action.kind === "merge" || action.kind === "claim") {
+      summary.recycleEvents.push(action.message);
       continue;
     }
     if (action.message.startsWith("Inferred live entry fill")) {
@@ -369,34 +375,30 @@ function buildTickDigestMessage(result: {
 
   return [
     `Tick digest ${tickAt}`,
-    `placed=${actionSummary.placed.length} cancelled=${actionSummary.cancelled.length} inferred_entry_fills=${actionSummary.inferredEntryFills.length} inferred_exit_fills=${actionSummary.inferredExitFills.length}`,
-    `wallet_usdc=${formatUsd(result.walletUsdcBalanceUsd)}`,
-    `wallet_algo=${result.walletAlgoBalance === undefined ? "unknown" : result.walletAlgoBalance.toFixed(6)}`,
-    `open_orders=${exposure.openOrders} bid_orders=${exposure.bidOrders} exit_orders=${exposure.exitOrders}`,
-    `bid_exposure=${formatUsd(exposure.bidExposureUsd)} reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)} reward_eligible_bid_exposure=${formatUsd(
+    `tick: placed=${actionSummary.placed.length} cancelled=${actionSummary.cancelled.length} entry_fills=${actionSummary.inferredEntryFills.length} exit_fills=${actionSummary.inferredExitFills.length}`,
+    `wallet: ${formatUsd(result.walletUsdcBalanceUsd)} USDC | ${
+      result.walletAlgoBalance === undefined ? "unknown" : result.walletAlgoBalance.toFixed(6)
+    } ALGO`,
+    `orders: ${exposure.openOrders} open (${exposure.bidOrders} bid, ${exposure.exitOrders} exit) | positions: ${exposure.openPositions} (${exposure.underwaterPositions} underwater)`,
+    `bid_exposure=${formatUsd(exposure.bidExposureUsd)} (reward ${formatUsd(exposure.rewardBidExposureUsd)}, eligible ${formatUsd(
       exposure.rewardEligibleBidExposureUsd,
-    )} spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
-    `reward_eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} reward_eligible_orders=${exposure.rewardEligibleOrders}`,
-    `exit_notional=${formatUsd(exposure.exitNotionalUsd)} reward_eligible_exit_notional=${formatUsd(
+    )}, spread ${formatUsd(exposure.spreadBidExposureUsd)})`,
+    `exit_notional=${formatUsd(exposure.exitNotionalUsd)} (controlled ${formatUsd(exposure.controlledExitNotionalUsd)}, eligible ${formatUsd(
       exposure.rewardEligibleExitNotionalUsd,
-    )} exits_not_counted_as_exposure=true`,
-    `controlled_exit_notional=${formatUsd(exposure.controlledExitNotionalUsd)} underwater_inventory_notional=${formatUsd(
-      exposure.underwaterInventoryNotionalUsd,
-    )} underwater_inventory_unrealised_loss=${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`,
-    `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)} realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
-    `realised_pnl=${formatUsd(result.state.realisedPnl)} unrealised_pnl=${formatUsd(result.state.unrealisedPnl)} trading_pnl=${formatUsd(result.state.totalPnl)}`,
-    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour active_reward_rate_daily=${formatRewardUsd(
+    )})`,
+    `underwater_inventory=${formatUsd(exposure.underwaterInventoryNotionalUsd)} (loss ${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)})`,
+    `pnl: realised=${formatUsd(result.state.realisedPnl)} unrealised=${formatUsd(result.state.unrealisedPnl)} trading=${formatUsd(
+      result.state.totalPnl,
+    )} exit_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
+    `rewards: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
       exposure.activeRewardRateDailyUsd,
-    )}/day potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour potential_reward_rate_daily=${formatRewardUsd(
-      exposure.potentialRewardRateDailyUsd,
-    )}/day active_reward_orders=${exposure.activeRewardOrders} active_reward_liquidity_share=${formatPercent(
+    )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
       exposure.activeRewardLiquidityShare,
-    )} potential_reward_liquidity_share=${formatPercent(
-      exposure.potentialRewardLiquidityShare,
-    )} est_rewards_accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
     `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
+    `recycled=${compactLines(actionSummary.recycleEvents)}`,
     `warnings=${compactLines(actionSummary.warnings, 1)}`,
   ].join("\n");
 }
@@ -451,38 +453,27 @@ function buildDailySummaryMessage(
   const date = new Date().toISOString().slice(0, 10);
   return [
     `Daily summary ${date}`,
-    `wallet_usdc=${formatUsd(walletUsdcBalanceUsd)}`,
-    `wallet_algo=${walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)}`,
-    `open_orders=${exposure.openOrders}`,
-    `bid_orders=${exposure.bidOrders}`,
-    `exit_orders=${exposure.exitOrders}`,
-    `bid_exposure=${formatUsd(exposure.bidExposureUsd)}`,
-    `reward_bid_exposure=${formatUsd(exposure.rewardBidExposureUsd)}`,
-    `reward_eligible_bid_exposure=${formatUsd(exposure.rewardEligibleBidExposureUsd)}`,
-    `reward_eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)}`,
-    `reward_eligible_orders=${exposure.rewardEligibleOrders}`,
-    `spread_bid_exposure=${formatUsd(exposure.spreadBidExposureUsd)}`,
-    `exit_notional=${formatUsd(exposure.exitNotionalUsd)}`,
-    `reward_eligible_exit_notional=${formatUsd(exposure.rewardEligibleExitNotionalUsd)}`,
-    `exits_not_counted_as_exposure=true`,
-    `controlled_exit_notional=${formatUsd(exposure.controlledExitNotionalUsd)}`,
-    `underwater_inventory_notional=${formatUsd(exposure.underwaterInventoryNotionalUsd)}`,
-    `underwater_inventory_unrealised_loss=${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)}`,
-    `exit_pnl_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
-    `realised_plus_open_exit_pnl=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
-    `trading_pnl=${formatUsd(state.totalPnl)}`,
-    `active_reward_rate=${formatRewardUsd(exposure.activeRewardRateHourlyUsd)}/hour`,
-    `active_reward_rate_daily=${formatRewardUsd(exposure.activeRewardRateDailyUsd)}/day`,
-    `active_reward_orders=${exposure.activeRewardOrders}`,
-    `potential_reward_rate=${formatRewardUsd(exposure.potentialRewardRateHourlyUsd)}/hour`,
-    `potential_reward_rate_daily=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day`,
-    `active_reward_liquidity_share=${formatPercent(exposure.activeRewardLiquidityShare)}`,
-    `potential_reward_liquidity_share=${formatPercent(exposure.potentialRewardLiquidityShare)}`,
-    `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)}`,
-    `parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
-    `est_rewards_accrued=${formatRewardUsd(state.estimatedRewardsUsd)}`,
-    `live_placed=${state.strategyStats.liveOrdersPlaced}`,
-    `live_cancelled=${state.strategyStats.liveOrdersCancelled}`,
+    `wallet: ${formatUsd(walletUsdcBalanceUsd)} USDC | ${
+      walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6)
+    } ALGO`,
+    `orders: ${exposure.openOrders} open (${exposure.bidOrders} bid, ${exposure.exitOrders} exit) | positions: ${exposure.openPositions} (${exposure.underwaterPositions} underwater)`,
+    `bid_exposure=${formatUsd(exposure.bidExposureUsd)} (reward ${formatUsd(exposure.rewardBidExposureUsd)}, eligible ${formatUsd(
+      exposure.rewardEligibleBidExposureUsd,
+    )}, spread ${formatUsd(exposure.spreadBidExposureUsd)})`,
+    `exit_notional=${formatUsd(exposure.exitNotionalUsd)} (controlled ${formatUsd(exposure.controlledExitNotionalUsd)}, eligible ${formatUsd(
+      exposure.rewardEligibleExitNotionalUsd,
+    )})`,
+    `underwater_inventory=${formatUsd(exposure.underwaterInventoryNotionalUsd)} (loss ${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)})`,
+    `pnl: realised=${formatUsd(state.realisedPnl)} trading=${formatUsd(state.totalPnl)} exit_if_filled=${formatUsd(
+      exposure.exitPnlIfFilledUsd,
+    )} realised_plus_open_exit=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
+    `rewards: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
+      exposure.activeRewardRateDailyUsd,
+    )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
+      exposure.activeRewardLiquidityShare,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} accrued=${formatRewardUsd(state.estimatedRewardsUsd)}`,
+    `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
+    `lifetime: placed=${state.strategyStats.liveOrdersPlaced} cancelled=${state.strategyStats.liveOrdersCancelled}`,
   ].join("\n");
 }
 

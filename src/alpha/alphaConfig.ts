@@ -63,6 +63,12 @@ export type AlphaConfig = {
   underwaterExitMaxLossCents: number;
   underwaterExitMaxNotionalUsd: number;
   underwaterExitMaxMarketLossUsd: number;
+  staleInventoryAgeHours: number;
+  staleInventoryMaxLossCents: number;
+  enableInventoryMerge: boolean;
+  inventoryMergeMinShares: number;
+  enableResolvedClaim: boolean;
+  maxInventoryNotionalUsd: number;
   maxSpreadMidpoint: number;
   spreadMaxMarketExposureUsd: number;
   spreadMaxTotalExposureUsd: number;
@@ -187,6 +193,12 @@ export function readAlphaConfig(): AlphaConfig {
     underwaterExitMaxLossCents: readNumber("ALPHA_UNDERWATER_EXIT_MAX_LOSS_CENTS", 2),
     underwaterExitMaxNotionalUsd: readNumber("ALPHA_UNDERWATER_EXIT_MAX_NOTIONAL_USD", 1),
     underwaterExitMaxMarketLossUsd: readNumber("ALPHA_UNDERWATER_EXIT_MAX_MARKET_LOSS_USD", 1),
+    staleInventoryAgeHours: readNumber("ALPHA_STALE_INVENTORY_AGE_HOURS", 72),
+    staleInventoryMaxLossCents: readNumber("ALPHA_STALE_INVENTORY_MAX_LOSS_CENTS", 25),
+    enableInventoryMerge: readBool("ALPHA_ENABLE_INVENTORY_MERGE", true),
+    inventoryMergeMinShares: readNumber("ALPHA_INVENTORY_MERGE_MIN_SHARES", 1),
+    enableResolvedClaim: readBool("ALPHA_ENABLE_RESOLVED_CLAIM", true),
+    maxInventoryNotionalUsd: readNumber("ALPHA_MAX_INVENTORY_NOTIONAL_USD", 0),
     maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),
     spreadMaxMarketExposureUsd: readNumber(
       "ALPHA_SPREAD_MAX_MARKET_EXPOSURE_USD",

@@ -231,7 +231,12 @@ export function generateQuotes(
       if (ask < minimumProfitableAsk) {
         if (!config.underwaterExitEnabled) continue;
         if ((positionAgeSeconds ?? 0) < config.underwaterExitMinAgeHours * 3600) continue;
-        const maxLossAsk = Math.max(0.000001, averageCost - config.underwaterExitMaxLossCents / 100);
+        // Once a position is stale, allow a deeper loss floor so the resting
+        // ask can sit close enough to the market to actually clear, instead of
+        // being pinned just below cost where it never fills.
+        const isStale = (positionAgeSeconds ?? 0) >= config.staleInventoryAgeHours * 3600;
+        const lossCapCents = isStale ? config.staleInventoryMaxLossCents : config.underwaterExitMaxLossCents;
+        const maxLossAsk = Math.max(0.000001, averageCost - lossCapCents / 100);
         ask = Math.max(ask, maxLossAsk);
         controlledUnderwaterExit = ask < minimumProfitableAsk;
       }

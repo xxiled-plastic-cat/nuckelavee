@@ -20,11 +20,18 @@ type AlphaRuntimeClient = AlphaClient & {
   }) => Promise<{ escrowAppId?: number; txIds?: string[]; confirmedRound?: number; matchedQuantity?: number; actualFillPrice?: number }>;
   mergeShares?: (input: { marketAppId: number; amount: number }) => Promise<{ txIds?: string[]; confirmedRound?: number }>;
   splitShares?: (input: { marketAppId: number; amount: number }) => Promise<{ txIds?: string[]; confirmedRound?: number }>;
+  claim?: (input: { marketAppId: number; assetId: number; amount?: number }) => Promise<{
+    success?: boolean;
+    txIds?: string[];
+    confirmedRound?: number;
+    amountClaimed?: number;
+  }>;
 };
 
-type MarketChainStatus = {
+export type MarketChainStatus = {
   isResolved?: boolean;
   isActivated?: boolean;
+  outcome?: number;
 };
 
 export function fromMicroUnits(value: number | null | undefined): number | undefined {
@@ -293,6 +300,10 @@ export class AlphaSdkClient {
     return markets.find((market) => market.id === marketIdOrSlug || market.slug === marketIdOrSlug || String(market.marketAppId) === marketIdOrSlug);
   }
 
+  async getMarketResolution(marketAppId: number): Promise<MarketChainStatus> {
+    return this.getMarketChainStatus(marketAppId);
+  }
+
   private async getMarketChainStatus(marketAppId: number): Promise<MarketChainStatus> {
     try {
       const app = (await this.algodClient.getApplicationByID(marketAppId).do()) as {
@@ -307,6 +318,7 @@ export class AlphaSdkClient {
         const key = decodeGlobalKey(entry.key);
         if (key === "is_resolved") status.isResolved = decodeGlobalUint(entry.value) === 1;
         if (key === "is_activated") status.isActivated = decodeGlobalUint(entry.value) === 1;
+        if (key === "outcome") status.outcome = decodeGlobalUint(entry.value);
       }
       return status;
     } catch {
@@ -460,6 +472,26 @@ export class AlphaSdkClient {
       amount: toMicroUnits(input.amountUsd),
     });
     return { ...result, txIds: result.txIds ?? [] };
+  }
+
+  async claim(input: {
+    marketAppId: number;
+    assetId: number;
+    amountShares?: number;
+  }): Promise<{ success: boolean; txIds: string[]; confirmedRound?: number; amountClaimedShares?: number }> {
+    const runtimeClient = this.client as AlphaRuntimeClient;
+    if (!runtimeClient.claim) throw new Error("Alpha SDK does not expose claim");
+    const result = await runtimeClient.claim({
+      marketAppId: input.marketAppId,
+      assetId: input.assetId,
+      amount: input.amountShares === undefined ? undefined : toMicroUnits(input.amountShares),
+    });
+    return {
+      success: result.success ?? true,
+      txIds: result.txIds ?? [],
+      confirmedRound: result.confirmedRound,
+      amountClaimedShares: fromMicroUnits(result.amountClaimed),
+    };
   }
 
   async cancelOrder(input: { marketAppId: number; escrowAppId: number; orderOwner: string }): Promise<{ success: boolean }> {
