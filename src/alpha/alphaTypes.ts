@@ -110,6 +110,13 @@ export type AlphaPaperPosition = {
   realisedPnl: number;
   unrealisedPnl: number;
   lastMark?: number;
+  /**
+   * Consecutive live ticks this position has been "unaccounted" (held in bot
+   * state but absent from both the wallet free balance and any open sell-order
+   * escrow). Used to prune stale/already-redeemed positions only after the
+   * signal persists, guarding against transient wallet/API read gaps.
+   */
+  unaccountedTicks?: number;
 };
 
 export type AlphaSpreadMarketStats = {

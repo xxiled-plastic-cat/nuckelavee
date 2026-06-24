@@ -3,7 +3,7 @@ import { validateLiveConfig } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits, roundShares } from "./alphaClient.js";
 import { checkQuoteRisk } from "./alphaRiskManager.js";
 import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
-import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaQuote } from "./alphaTypes.js";
+import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaPaperPosition, AlphaQuote } from "./alphaTypes.js";
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
 import { generateQuotes } from "./quoteEngine.js";
 import { runParityLane } from "./parityTrader.js";
@@ -666,6 +666,233 @@ function controlledUnderwaterExitAllowed(order: AlphaPaperOrder, state: AlphaBot
   return status.allowed;
 }
 
+const SHARE_EPSILON = 1e-3;
+
+/**
+ * Collapse duplicate state positions that share a marketAppId but were keyed
+ * differently across ticks (UUID `market.id` while in-scan vs `String(appId)`
+ * once out-of-scan). Duplicates represent the SAME logical holding, so shares
+ * are merged by MAX (never summed) to avoid inflating inventory. The UUID key
+ * is preferred as canonical so in-scan lookups by `market.id` keep working.
+ */
+function dedupePositionsByAppId(state: AlphaBotState): number {
+  const keysByAppId = new Map<number, string[]>();
+  for (const [key, position] of Object.entries(state.positionsByMarket)) {
+    if (position.marketAppId === undefined) continue;
+    const keys = keysByAppId.get(position.marketAppId) ?? [];
+    keys.push(key);
+    keysByAppId.set(position.marketAppId, keys);
+  }
+
+  let merged = 0;
+  for (const [appId, keys] of keysByAppId) {
+    if (keys.length <= 1) continue;
+    const stringKey = String(appId);
+    const canonicalKey = keys.find((key) => key !== stringKey) ?? stringKey;
+    const canonical = state.positionsByMarket[canonicalKey];
+    for (const key of keys) {
+      if (key === canonicalKey) continue;
+      const dup = state.positionsByMarket[key];
+      canonical.yesShares = Math.max(canonical.yesShares, dup.yesShares);
+      canonical.noShares = Math.max(canonical.noShares, dup.noShares);
+      canonical.avgYesCost = canonical.avgYesCost || dup.avgYesCost;
+      canonical.avgNoCost = canonical.avgNoCost || dup.avgNoCost;
+      canonical.lastMark = canonical.lastMark ?? dup.lastMark;
+      canonical.title = canonical.title || dup.title;
+      canonical.slug = canonical.slug ?? dup.slug;
+      canonical.unaccountedTicks = Math.max(canonical.unaccountedTicks ?? 0, dup.unaccountedTicks ?? 0);
+      delete state.positionsByMarket[key];
+      merged += 1;
+    }
+  }
+  return merged;
+}
+
+function escrowedSellSharesFor(walletOrders: OpenOrder[], marketAppId: number, outcome: AlphaOutcome): number {
+  const positionFlag = outcome === "YES" ? 1 : 0;
+  return walletOrders
+    .filter((order) => order.marketAppId === marketAppId && order.side === 0 && order.position === positionFlag)
+    .reduce((sum, order) => sum + (fromMicroUnits(Math.max(0, order.quantity - order.quantityFilled)) ?? 0), 0);
+}
+
+/**
+ * Realise PnL for a stale (unaccounted) side of a position whose tokens are no
+ * longer in the wallet. Winning resolved sides were auto-paid $1/share to the
+ * wallet already; losing sides burned; unresolved-but-gone shares are written
+ * off at last mark. Returns the realised delta (added to ledger by caller).
+ */
+function realiseStaleSide(
+  position: AlphaPaperPosition,
+  outcome: AlphaOutcome,
+  shares: number,
+  resolution: { isResolved?: boolean; outcome?: number },
+): { realised: number; note: string } {
+  const avgCost = outcome === "YES" ? position.avgYesCost ?? 0 : position.avgNoCost ?? 0;
+  const cost = shares * avgCost;
+  if (resolution.isResolved === true) {
+    const sideWon = (resolution.outcome === 1 && outcome === "YES") || (resolution.outcome === 0 && outcome === "NO");
+    if (resolution.outcome === 1 || resolution.outcome === 0) {
+      const proceeds = sideWon ? shares : 0;
+      return {
+        realised: proceeds - cost,
+        note: `resolved ${describeResolutionOutcome(resolution.outcome)}; ${sideWon ? "WON" : "LOST"} → proceeds $${proceeds.toFixed(2)} (auto-paid to wallet), cost $${cost.toFixed(2)}`,
+      };
+    }
+    const mark = position.lastMark ?? 0;
+    return {
+      realised: mark * shares - cost,
+      note: `resolved voided/unknown (outcome=${resolution.outcome}); written off at last mark ${mark.toFixed(3)}`,
+    };
+  }
+  const mark = position.lastMark ?? 0;
+  return {
+    realised: mark * shares - cost,
+    note: `not resolved on-chain but absent from wallet/escrow; written off at last mark ${mark.toFixed(3)}`,
+  };
+}
+
+function describeResolutionOutcome(outcome: number | undefined): string {
+  if (outcome === 1) return "YES won";
+  if (outcome === 0) return "NO won";
+  if (outcome !== undefined) return `outcome=${outcome}`;
+  return "outcome unknown";
+}
+
+/**
+ * Reconcile each bot-state position against the wallet's actual free ASA
+ * balance plus shares escrowed in open SELL orders. getPositions only returns
+ * free wallet balances; shares resting in a sell order live in that order's
+ * escrow app and are excluded. A position is only genuinely "gone" (resolved,
+ * redeemed, burned, or stale state) when its state shares are accounted for by
+ * neither the free balance nor any open sell-order escrow. Persistently
+ * unaccounted positions are resolved/written-off and pruned (live mode only).
+ */
+async function reconcilePositions(input: {
+  liveClient: AlphaSdkClient;
+  config: AlphaConfig;
+  mode: Extract<AlphaMode, "live-dry-run" | "live">;
+  state: AlphaBotState;
+  walletPositions: WalletPosition[];
+  walletOrders: OpenOrder[];
+  actions: LiveAction[];
+}): Promise<void> {
+  const { liveClient, config, mode, state, walletPositions, walletOrders, actions } = input;
+
+  const merged = dedupePositionsByAppId(state);
+  if (merged > 0) {
+    actions.push({ kind: "skip", message: `Position reconcile: merged ${merged} duplicate state key(s) by marketAppId` });
+  }
+
+  const walletByAppId = new Map<number, WalletPosition>();
+  for (const wallet of walletPositions) walletByAppId.set(wallet.marketAppId, wallet);
+
+  const pruneTicks = Math.max(1, config.stalePositionPruneTicks);
+
+  for (const [key, position] of Object.entries(state.positionsByMarket)) {
+    const appId = position.marketAppId;
+    const wallet = appId !== undefined ? walletByAppId.get(appId) : undefined;
+    const title = position.title || (appId !== undefined ? `market ${appId}` : key);
+
+    const sideState: Record<AlphaOutcome, { stateShares: number; free: number; escrow: number; unaccounted: number }> = {
+      YES: { stateShares: position.yesShares, free: 0, escrow: 0, unaccounted: 0 },
+      NO: { stateShares: position.noShares, free: 0, escrow: 0, unaccounted: 0 },
+    };
+    for (const outcome of ["YES", "NO"] as const) {
+      const free = (outcome === "YES" ? fromMicroUnits(wallet?.yesBalance) : fromMicroUnits(wallet?.noBalance)) ?? 0;
+      const escrow = appId !== undefined ? escrowedSellSharesFor(walletOrders, appId, outcome) : 0;
+      sideState[outcome].free = free;
+      sideState[outcome].escrow = escrow;
+      sideState[outcome].unaccounted = sideState[outcome].stateShares - (free + escrow);
+      const { stateShares } = sideState[outcome];
+      if (stateShares <= SHARE_EPSILON && free <= SHARE_EPSILON && escrow <= SHARE_EPSILON) continue;
+      let verdict: string;
+      const unaccounted = sideState[outcome].unaccounted;
+      if (stateShares <= SHARE_EPSILON) {
+        verdict = "wallet/escrow holds shares not tracked in bot state";
+      } else if (Math.abs(unaccounted) <= SHARE_EPSILON) {
+        verdict = escrow > SHARE_EPSILON ? "fully accounted (some escrowed in open sell orders)" : "fully accounted (free wallet balance)";
+      } else if (unaccounted > 0) {
+        verdict = `UNACCOUNTED ${unaccounted.toFixed(6)} share(s): not in wallet or open orders`;
+      } else {
+        verdict = `wallet+escrow exceeds state by ${Math.abs(unaccounted).toFixed(6)} share(s)`;
+      }
+      actions.push({
+        kind: "skip",
+        message: `Position reconcile: ${title} (appId=${appId ?? "?"}) ${outcome} state=${stateShares.toFixed(6)} free=${free.toFixed(
+          6,
+        )} escrow=${escrow.toFixed(6)} → ${verdict}`,
+      });
+    }
+
+    const hasUnaccounted = sideState.YES.unaccounted > SHARE_EPSILON || sideState.NO.unaccounted > SHARE_EPSILON;
+    if (!hasUnaccounted) {
+      if ((position.unaccountedTicks ?? 0) !== 0) position.unaccountedTicks = 0;
+      continue;
+    }
+
+    if (!config.enableStalePositionReconcile) continue;
+
+    position.unaccountedTicks = (position.unaccountedTicks ?? 0) + 1;
+    if (position.unaccountedTicks < pruneTicks) {
+      actions.push({
+        kind: "skip",
+        message: `Position reconcile: ${title} (appId=${appId ?? "?"}) unaccounted ${position.unaccountedTicks}/${pruneTicks} tick(s) before reconcile`,
+      });
+      continue;
+    }
+
+    if (appId === undefined) continue;
+
+    let resolution: { isResolved?: boolean; outcome?: number } = {};
+    try {
+      resolution = await liveClient.getMarketResolution(appId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      actions.push({
+        kind: "skip",
+        message: `Position reconcile: ${title} (appId=${appId}) resolution lookup failed, deferring prune: ${message}`,
+      });
+      continue;
+    }
+
+    for (const outcome of ["YES", "NO"] as const) {
+      const unaccounted = sideState[outcome].unaccounted;
+      if (unaccounted <= SHARE_EPSILON) continue;
+      const { realised, note } = realiseStaleSide(position, outcome, unaccounted, resolution);
+      const accounted = sideState[outcome].free + sideState[outcome].escrow;
+      if (mode === "live-dry-run") {
+        actions.push({
+          kind: "claim",
+          message: `Would reconcile ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}; realised=${fmtSignedUsd(realised)}`,
+        });
+        continue;
+      }
+      if (outcome === "YES") {
+        position.yesShares = accounted;
+        if (position.yesShares <= SHARE_EPSILON) position.avgYesCost = 0;
+      } else {
+        position.noShares = accounted;
+        if (position.noShares <= SHARE_EPSILON) position.avgNoCost = 0;
+      }
+      position.realisedPnl += realised;
+      state.realisedPnl += realised;
+      actions.push({
+        kind: "claim",
+        message: `Reconciled ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}; realised=${fmtSignedUsd(realised)}`,
+      });
+    }
+
+    if (mode === "live") {
+      position.unaccountedTicks = 0;
+      if (position.yesShares <= SHARE_EPSILON && position.noShares <= SHARE_EPSILON) {
+        delete state.positionsByMarket[key];
+        actions.push({ kind: "claim", message: `Position reconcile: pruned fully reconciled position ${title} (appId=${appId})` });
+      }
+      await saveAlphaState(config.stateKey, state);
+    }
+  }
+}
+
 function addInventoryExitDiagnostics(
   actions: LiveAction[],
   state: AlphaBotState,
@@ -879,6 +1106,9 @@ export async function runLiveTick(
     actions.push(
       ...(await runResolvedClaimLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
     );
+  }
+  if (positionsSynced) {
+    await reconcilePositions({ liveClient, config, mode, state, walletPositions: rawWalletPositions, walletOrders, actions });
   }
   accrueEstimatedRewards(state, config, Date.now(), {
     markets: [...scan.rewardMarkets, ...scan.markets],

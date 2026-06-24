@@ -38,6 +38,22 @@ function usdcForSide(outcome: number | undefined, side: "YES" | "NO", shares: nu
   return undefined;
 }
 
+function describeOutcome(outcome: number | undefined): string {
+  if (outcome === 1) return "YES won";
+  if (outcome === 0) return "NO won";
+  if (outcome !== undefined) return `outcome=${outcome} (voided/unknown)`;
+  return "outcome unknown";
+}
+
+function describeSideResult(outcome: number | undefined, side: "YES" | "NO", shares: number, avgCost: number): string {
+  const usdc = usdcForSide(outcome, side, shares);
+  if (usdc === undefined) return `${shares.toFixed(6)} ${side} share(s); outcome unknown, will claim anyway`;
+  const pnl = usdc - shares * avgCost;
+  const pnlLabel = pnl >= 0 ? `+$${pnl.toFixed(4)}` : `-$${Math.abs(pnl).toFixed(4)}`;
+  if (usdc === 0) return `${shares.toFixed(6)} ${side} share(s); LOSING side → $0.00 USDC (${pnlLabel})`;
+  return `${shares.toFixed(6)} ${side} share(s); WINNING side → ~$${usdc.toFixed(2)} USDC (${pnlLabel})`;
+}
+
 export async function runResolvedClaimLane(input: {
   liveClient: AlphaSdkClient;
   config: AlphaConfig;
@@ -56,28 +72,54 @@ export async function runResolvedClaimLane(input: {
     const noShares = fromMicroUnits(position.noBalance) ?? 0;
     if (yesShares <= 0 && noShares <= 0) continue;
 
+    const title = position.title || `market ${position.marketAppId}`;
+    const sharesLabel = [
+      yesShares > 0 ? `YES=${yesShares.toFixed(6)}` : null,
+      noShares > 0 ? `NO=${noShares.toFixed(6)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
     let resolution: MarketChainStatus;
     try {
       resolution = await liveClient.getMarketResolution(position.marketAppId);
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      actions.push({
+        kind: "skip",
+        message: `Claim check failed ${title} (appId=${position.marketAppId}) ${sharesLabel}: resolution lookup error: ${message}`,
+      });
       continue;
     }
-    if (resolution.isResolved !== true) continue;
 
-    const title = position.title || `market ${position.marketAppId}`;
+    if (resolution.isResolved !== true) {
+      actions.push({
+        kind: "skip",
+        message: `Claim skipped ${title} (appId=${position.marketAppId}) ${sharesLabel}: not yet resolved on-chain (isResolved=${resolution.isResolved ?? "undefined"})`,
+      });
+      continue;
+    }
+
     const outcome = resolution.outcome;
+    actions.push({
+      kind: "skip",
+      message: `Claim lane: ${title} (appId=${position.marketAppId}) is resolved; ${describeOutcome(outcome)}; ${sharesLabel}`,
+    });
+
     const sides: Array<{ side: "YES" | "NO"; assetId: number; shares: number }> = [];
     if (yesShares > 0) sides.push({ side: "YES", assetId: position.yesAssetId, shares: yesShares });
     if (noShares > 0) sides.push({ side: "NO", assetId: position.noAssetId, shares: noShares });
 
     for (const { side, assetId, shares } of sides) {
+      const entry = findStatePositionEntry(state, position.marketAppId);
+      const avgCost = entry ? (side === "YES" ? entry.position.avgYesCost ?? 0 : entry.position.avgNoCost ?? 0) : 0;
+      const sideDesc = describeSideResult(outcome, side, shares, avgCost);
+
       if (mode === "live-dry-run") {
         const usdc = usdcForSide(outcome, side, shares);
         actions.push({
           kind: "claim",
-          message: `Would claim ${shares.toFixed(6)} ${side} share(s) of resolved ${title}${
-            usdc !== undefined ? ` (~$${usdc.toFixed(2)} USDC)` : ""
-          }`,
+          message: `Would claim ${title} ${side}: ${sideDesc}${usdc !== undefined ? `; proceeds ~$${usdc.toFixed(2)} USDC` : ""}`,
         });
         continue;
       }
@@ -86,9 +128,7 @@ export async function runResolvedClaimLane(input: {
         const result = await liveClient.claim({ marketAppId: position.marketAppId, assetId });
         const usdc = usdcForSide(outcome, side, shares);
         let realised: number | undefined;
-        const entry = findStatePositionEntry(state, position.marketAppId);
         if (entry) {
-          const avgCost = side === "YES" ? entry.position.avgYesCost ?? 0 : entry.position.avgNoCost ?? 0;
           if (usdc !== undefined) {
             realised = usdc - shares * avgCost;
             entry.position.realisedPnl += realised;
@@ -108,14 +148,14 @@ export async function runResolvedClaimLane(input: {
         await saveAlphaState(config.stateKey, state);
         actions.push({
           kind: "claim",
-          message: `Claimed ${shares.toFixed(6)} ${side} share(s) of resolved ${title}${
+          message: `Claimed ${title} ${side}: ${sideDesc}${
             realised !== undefined ? `; realised=${fmtUsd(realised)}` : ""
           } txIds=${result.txIds.join(",")}`,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(`[alpha-live] resolved claim failed market=${position.marketAppId} side=${side}: ${message}`);
-        actions.push({ kind: "skip", message: `Resolved claim failed ${title} ${side}: ${message}` });
+        actions.push({ kind: "skip", message: `Resolved claim failed ${title} ${side}: ${sideDesc}; error: ${message}` });
       }
     }
   }
