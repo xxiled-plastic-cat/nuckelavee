@@ -68,8 +68,6 @@ export type AlphaConfig = {
   enableInventoryMerge: boolean;
   inventoryMergeMinShares: number;
   enableResolvedClaim: boolean;
-  enableStalePositionReconcile: boolean;
-  stalePositionPruneTicks: number;
   maxInventoryNotionalUsd: number;
   rewardRateCalibration: number;
   maxSpreadMidpoint: number;
@@ -201,8 +199,6 @@ export function readAlphaConfig(): AlphaConfig {
     enableInventoryMerge: readBool("ALPHA_ENABLE_INVENTORY_MERGE", true),
     inventoryMergeMinShares: readNumber("ALPHA_INVENTORY_MERGE_MIN_SHARES", 1),
     enableResolvedClaim: readBool("ALPHA_ENABLE_RESOLVED_CLAIM", true),
-    enableStalePositionReconcile: readBool("ALPHA_ENABLE_STALE_POSITION_RECONCILE", true),
-    stalePositionPruneTicks: readInt("ALPHA_STALE_POSITION_PRUNE_TICKS", 3),
     maxInventoryNotionalUsd: readNumber("ALPHA_MAX_INVENTORY_NOTIONAL_USD", 0),
     rewardRateCalibration: readNumber("ALPHA_REWARD_RATE_CALIBRATION", 1),
     maxSpreadMidpoint: readNumber("ALPHA_MAX_SPREAD_MIDPOINT", 0.99),

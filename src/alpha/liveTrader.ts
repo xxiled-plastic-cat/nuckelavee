@@ -668,6 +668,11 @@ function controlledUnderwaterExitAllowed(order: AlphaPaperOrder, state: AlphaBot
 
 const SHARE_EPSILON = 1e-3;
 
+// Consecutive ticks a position must stay unaccounted (absent from wallet free
+// balance AND open sell-order escrow) before it is reconciled and pruned.
+// Guards against transient wallet/API read gaps; always on.
+const STALE_POSITION_PRUNE_TICKS = 3;
+
 /**
  * Collapse duplicate state positions that share a marketAppId but were keyed
  * differently across ticks (UUID `market.id` while in-scan vs `String(appId)`
@@ -786,7 +791,7 @@ async function reconcilePositions(input: {
   const walletByAppId = new Map<number, WalletPosition>();
   for (const wallet of walletPositions) walletByAppId.set(wallet.marketAppId, wallet);
 
-  const pruneTicks = Math.max(1, config.stalePositionPruneTicks);
+  const pruneTicks = STALE_POSITION_PRUNE_TICKS;
 
   for (const [key, position] of Object.entries(state.positionsByMarket)) {
     const appId = position.marketAppId;
@@ -829,8 +834,6 @@ async function reconcilePositions(input: {
       if ((position.unaccountedTicks ?? 0) !== 0) position.unaccountedTicks = 0;
       continue;
     }
-
-    if (!config.enableStalePositionReconcile) continue;
 
     position.unaccountedTicks = (position.unaccountedTicks ?? 0) + 1;
     if (position.unaccountedTicks < pruneTicks) {
