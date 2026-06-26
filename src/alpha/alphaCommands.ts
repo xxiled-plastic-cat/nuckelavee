@@ -495,7 +495,9 @@ function buildTickDigestMessage(result: {
       exposure.activeRewardRateDailyUsd,
     )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
       exposure.activeRewardLiquidityShare,
-    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} accrued=${formatRewardUsd(result.state.estimatedRewardsUsd)}`,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} est=${formatRewardUsd(result.state.estimatedRewardsUsd)} received=${formatRewardUsd(
+      exposure.actualRewardsReceivedUsd,
+    )}`,
     `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
@@ -572,7 +574,9 @@ function buildDailySummaryMessage(
       exposure.activeRewardRateDailyUsd,
     )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
       exposure.activeRewardLiquidityShare,
-    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} accrued=${formatRewardUsd(state.estimatedRewardsUsd)}`,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} est=${formatRewardUsd(state.estimatedRewardsUsd)} received=${formatRewardUsd(
+      exposure.actualRewardsReceivedUsd,
+    )}`,
     `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
     `lifetime: placed=${state.strategyStats.liveOrdersPlaced} cancelled=${state.strategyStats.liveOrdersCancelled}`,
   ].join("\n");

@@ -1,3 +1,11 @@
+/**
+ * `dailyRewardsSource` value used when the API exposes no genuine daily-emission
+ * field and the client falls back to treating the entire reward pool as a
+ * "daily" figure. Markets tagged this way historically pay ~$0, so reward
+ * income reporting and the reward lane both treat this as unreliable.
+ */
+export const POOL_FALLBACK_DAILY_REWARD_SOURCE = "totalRewards-pool-fallback";
+
 export type AlphaOutcome = "YES" | "NO";
 export type AlphaOrderSide = "bid" | "ask";
 export type AlphaOrderStatus = "open" | "filled" | "cancelled" | "expired";

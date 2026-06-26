@@ -1,7 +1,7 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaBotState, AlphaMarket, AlphaOpportunity, AlphaOrderbook, AlphaParityPlan } from "./alphaTypes.js";
 import { summarizeBooks, type AlphaScanResult } from "./alphaMarketScanner.js";
-import { estimateRewardRateForOrders, type RewardRateContext } from "./rewardRateEstimator.js";
+import { estimateRewardRateForOrders, reliableDailyRewardUsd, type RewardRateContext } from "./rewardRateEstimator.js";
 
 export function fmtUsd(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "unknown";
@@ -298,16 +298,34 @@ export function summarizeLiveExposure(
   activeRewardRateHourlyUsd?: number;
   potentialRewardRateDailyUsd?: number;
   potentialRewardRateHourlyUsd?: number;
+  actualRewardsReceivedUsd?: number;
+  actualRewardsAsOf?: string;
 } {
+  // Reward income/eligibility reporting is restricted to markets with a genuine
+  // daily emission. Pool-fallback markets pay ~$0 on-chain, so an order resting
+  // in one is not counted as reward-eligible liquidity (avoids fabricated income
+  // in the digest). When no market context is supplied we cannot verify, so we
+  // do not gate (preserves non-live report behaviour).
+  const rewardMarketByAppId = new Map<number, AlphaMarket>();
+  if (rewardContext.markets) {
+    const iterable = rewardContext.markets instanceof Map ? rewardContext.markets.values() : rewardContext.markets;
+    for (const market of iterable) rewardMarketByAppId.set(market.marketAppId, market);
+  }
+  const haveMarketContext = rewardMarketByAppId.size > 0;
+  const isReliableRewardMarket = (marketAppId: number): boolean =>
+    !haveMarketContext || reliableDailyRewardUsd(rewardMarketByAppId.get(marketAppId)) !== undefined;
+  const isReportableRewardOrder = (order: { rewardEligible: boolean; marketAppId: number }): boolean =>
+    order.rewardEligible && isReliableRewardMarket(order.marketAppId);
+
   const open = state.openOrders.filter((order) => order.status === "open" && order.runMode === "live");
   const bids = open.filter((order) => order.side === "bid");
   const rewardBids = bids.filter((order) => order.source === "reward");
-  const rewardEligibleBids = bids.filter((order) => order.rewardEligible);
-  const rewardEligibleOrders = open.filter((order) => order.rewardEligible);
+  const rewardEligibleBids = bids.filter((order) => isReportableRewardOrder(order));
+  const rewardEligibleOrders = open.filter((order) => isReportableRewardOrder(order));
   const spreadBids = bids.filter((order) => order.source === "spread");
   const exits = open.filter((order) => order.side === "ask" || order.source === "inventory_exit");
   const controlledExits = exits.filter((order) => order.reason.startsWith("controlled underwater exit"));
-  const rewardEligibleExits = exits.filter((order) => order.rewardEligible);
+  const rewardEligibleExits = exits.filter((order) => isReportableRewardOrder(order));
   const bidExposure = (orders: typeof bids) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
   const exitNotional = (orders: typeof exits) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
   const exitPnlIfFilledUsd = exits.reduce((sum, order) => {
@@ -377,6 +395,8 @@ export function summarizeLiveExposure(
     activeRewardRateHourlyUsd: activeRewardRate.hourlyUsd,
     potentialRewardRateDailyUsd: potentialRewardRate.dailyUsd,
     potentialRewardRateHourlyUsd: potentialRewardRate.hourlyUsd,
+    actualRewardsReceivedUsd: state.capitalLedger?.rewardsReceivedUsd,
+    actualRewardsAsOf: state.capitalLedger?.lastScanAt,
   };
 }
 
@@ -422,7 +442,9 @@ export function printLiveSummary(
       exposure.potentialRewardRateDailyUsd,
     )}/day | share ${fmtPercent(exposure.activeRewardLiquidityShare)}/${fmtPercent(
       exposure.potentialRewardLiquidityShare,
-    )} | accrued ${fmtRewardUsd(state.estimatedRewardsUsd)}`,
+    )} | est ${fmtRewardUsd(state.estimatedRewardsUsd)} | received ${fmtRewardUsd(exposure.actualRewardsReceivedUsd)}${
+      exposure.actualRewardsAsOf ? ` (as of ${exposure.actualRewardsAsOf.slice(0, 10)})` : ""
+    }`,
   );
   console.log(
     `  spread: pnl ${fmtUsd(state.strategyStats.spreadRealisedPnl)} fills ${state.strategyStats.spreadEntryFills}/${

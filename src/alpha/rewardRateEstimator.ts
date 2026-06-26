@@ -1,4 +1,16 @@
-import type { AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaOrderSide, AlphaPaperOrder } from "./alphaTypes.js";
+import { POOL_FALLBACK_DAILY_REWARD_SOURCE, type AlphaMarket, type AlphaOrderbook, type AlphaOutcome, type AlphaOrderSide, type AlphaPaperOrder } from "./alphaTypes.js";
+
+/**
+ * A market's daily reward in USD, but only when it is a genuine, non-zero daily
+ * emission. Pool-fallback figures (whole pool treated as a day) are fabricated
+ * overstatements that on-chain pay ~$0, so they are reported as no income.
+ */
+export function reliableDailyRewardUsd(market: AlphaMarket | undefined): number | undefined {
+  const daily = market?.reward.dailyRewardsUsd;
+  if (daily === undefined || !Number.isFinite(daily) || daily <= 0) return undefined;
+  if (market?.reward.dailyRewardsSource === POOL_FALLBACK_DAILY_REWARD_SOURCE) return undefined;
+  return daily;
+}
 
 type BookLevel = {
   price: number;
@@ -44,11 +56,6 @@ function groupOrdersByMarket(orders: AlphaPaperOrder[]): Map<number, AlphaPaperO
     byMarket.set(order.marketAppId, existing);
   }
   return byMarket;
-}
-
-function maxDefined(values: Array<number | undefined>): number | undefined {
-  const finite = values.filter((value): value is number => value !== undefined && Number.isFinite(value));
-  return finite.length > 0 ? Math.max(...finite) : undefined;
 }
 
 function maxRewardSpreadCents(market: AlphaMarket | undefined): number | undefined {
@@ -152,7 +159,10 @@ export function estimateRewardRateForOrders(orders: AlphaPaperOrder[], context: 
   for (const [marketAppId, marketOrders] of ordersByMarket) {
     const market = marketByAppId.get(marketAppId);
     const book = orderbooks.get(marketAppId);
-    const dailyRewardUsd = maxDefined([market?.reward.dailyRewardsUsd, ...marketOrders.map((order) => order.estimatedRewardUsdPerDay)]);
+    // Only count income from markets with a genuine daily emission. Pool-fallback
+    // markets (and the per-order estimates derived from them) are excluded so the
+    // reward rate, liquidity share, and accrual never claim fabricated income.
+    const dailyRewardUsd = reliableDailyRewardUsd(market);
     if (dailyRewardUsd === undefined || dailyRewardUsd <= 0) continue;
 
     const share = estimateMarketRewardShare(marketOrders, market, book);

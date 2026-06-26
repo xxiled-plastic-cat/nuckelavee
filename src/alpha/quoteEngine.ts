@@ -1,10 +1,8 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import { roundShares } from "./alphaClient.js";
-import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaQuote } from "./alphaTypes.js";
+import { POOL_FALLBACK_DAILY_REWARD_SOURCE, type AlphaBotState, type AlphaMarket, type AlphaOrderbook, type AlphaOutcome, type AlphaQuote } from "./alphaTypes.js";
 
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
-
-const POOL_FALLBACK_DAILY_SOURCE = "totalRewards-pool-fallback";
 
 /**
  * Whether the reward lane should commit capital to this market. We only farm
@@ -18,7 +16,7 @@ export function rewardLaneAllowsMarket(market: AlphaMarket, config: AlphaConfig)
   if (!config.rewardRequireRealDaily) return true;
   const daily = market.reward.dailyRewardsUsd;
   if (daily === undefined || daily <= 0) return false;
-  return market.reward.dailyRewardsSource !== POOL_FALLBACK_DAILY_SOURCE;
+  return market.reward.dailyRewardsSource !== POOL_FALLBACK_DAILY_REWARD_SOURCE;
 }
 
 function getOutcomeBook(book: AlphaOrderbook, outcome: AlphaOutcome): { bid?: number; ask?: number; mid?: number; spread?: number } {

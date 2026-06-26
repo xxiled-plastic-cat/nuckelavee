@@ -2,7 +2,7 @@ import { AlphaClient, type Market, type MarketOption, type OpenOrder, type Walle
 import algosdk from "algosdk";
 
 import type { AlphaConfig } from "./alphaConfig.js";
-import type { AlphaBookLevel, AlphaMarket, AlphaOrderbook, AlphaRewardInfo } from "./alphaTypes.js";
+import { POOL_FALLBACK_DAILY_REWARD_SOURCE, type AlphaBookLevel, type AlphaMarket, type AlphaOrderbook, type AlphaRewardInfo } from "./alphaTypes.js";
 
 const MICRO = 1_000_000;
 const ALPHA_API_HOST = "alphaarcade.com";
@@ -108,7 +108,7 @@ function resolveDailyReward(looseMarket: Record<string, unknown>): { usd?: numbe
     if (usd !== undefined && usd > 0) return { usd, source };
   }
   const poolUsd = normalizeUsd(looseMarket.totalRewards);
-  if (poolUsd !== undefined && poolUsd > 0) return { usd: poolUsd, source: "totalRewards-pool-fallback" };
+  if (poolUsd !== undefined && poolUsd > 0) return { usd: poolUsd, source: POOL_FALLBACK_DAILY_REWARD_SOURCE };
   return { source: "none" };
 }
 

@@ -11,6 +11,7 @@ import { runInventoryMergeLane } from "./inventoryMerger.js";
 import { runResolvedClaimLane } from "./resolvedClaimLane.js";
 import { updateUnrealisedPnl } from "./pnlTracker.js";
 import { accrueEstimatedRewards } from "./rewardTracker.js";
+import { buildCapitalLedger, mergeCapitalLedgerIntoState } from "./capitalLedger.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
@@ -673,6 +674,55 @@ const SHARE_EPSILON = 1e-3;
 // Guards against transient wallet/API read gaps; always on.
 const STALE_POSITION_PRUNE_TICKS = 3;
 
+// How often the live tick re-scans the chain for actual LP reward receipts so
+// the digest's "received" figure stays current without scanning every tick.
+const ACTUAL_REWARD_REFRESH_MS = 3_600_000;
+
+/**
+ * Throttled refresh of the actual on-chain LP rewards received (the real number
+ * shown in the digest), persisted into state. Defensive: a scan failure never
+ * affects trading. Only runs in live mode (dry-run keeps the last value).
+ */
+async function refreshActualRewardsReceived(input: {
+  config: AlphaConfig;
+  mode: Extract<AlphaMode, "live-dry-run" | "live">;
+  state: AlphaBotState;
+  marketAppIds: number[];
+  walletOrders: OpenOrder[];
+  actions: LiveAction[];
+}): Promise<void> {
+  const { config, mode, state, marketAppIds, walletOrders, actions } = input;
+  if (mode !== "live" || !config.walletAddress) return;
+  const lastScan = state.capitalLedger?.lastScanAt ? Date.parse(state.capitalLedger.lastScanAt) : 0;
+  const fresh = Number.isFinite(lastScan) && Date.now() - lastScan < ACTUAL_REWARD_REFRESH_MS;
+  if (fresh) return;
+  try {
+    const escrowAppIds = [
+      ...state.openOrders.filter((order) => order.liveEscrowAppId !== undefined).map((order) => order.liveEscrowAppId as number),
+      ...walletOrders.map((order) => order.escrowAppId),
+    ];
+    const ledger = await buildCapitalLedger({
+      config,
+      walletAddress: config.walletAddress,
+      bidEscrowUsd: 0,
+      positions: [],
+      state,
+      marketAppIds,
+      escrowAppIds,
+      forceRefresh: true,
+    });
+    const merged = mergeCapitalLedgerIntoState(state, ledger.flows, ledger.scanMeta);
+    state.capitalLedger = merged.capitalLedger;
+    actions.push({
+      kind: "skip",
+      message: `Refreshed actual LP rewards received: $${ledger.flows.rewardsReceivedUsd.toFixed(6)}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    actions.push({ kind: "skip", message: `Actual reward receipt refresh skipped: ${message}` });
+  }
+}
+
 /**
  * Collapse duplicate state positions that share a marketAppId but were keyed
  * differently across ticks (UUID `market.id` while in-scan vs `String(appId)`
@@ -1118,6 +1168,7 @@ export async function runLiveTick(
     orderbooks: scan.orderbooks,
     walletAddress: config.walletAddress,
   });
+  await refreshActualRewardsReceived({ config, mode, state, marketAppIds: [...marketByAppId.keys()], walletOrders, actions });
   updateUnrealisedPnl(state, scan.orderbooks);
   const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
   actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
