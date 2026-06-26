@@ -87,4 +87,21 @@ export type DashboardSnapshot = {
   positions: DashboardPositionRow[];
   openOrders: DashboardOpenOrderRow[];
   activity: DashboardActivityItem[];
+  realPnl?: DashboardRealPnl;
+};
+
+export type DashboardRealPnl = {
+  contributedCapitalUsd: number;
+  netWorthUsd?: number;
+  realPnlUsd?: number;
+  walletUsdc?: number;
+  bidEscrowUsd: number;
+  positionsValueUsd: number;
+  rewardsReceivedUsd: number;
+  marketUsdcInUsd: number;
+  marketUsdcOutUsd: number;
+  tradingPnlUsd: number;
+  estimatedRewardsUsd: number;
+  externalCapitalDriftUsd: number;
+  ledgerCachedAt?: string;
 };

@@ -12,6 +12,7 @@
     "alpha:scan": "tsx src/alpha/alphaCommands.ts scan",
     "alpha:rewards": "tsx src/alpha/alphaCommands.ts rewards",
     "alpha:reward-history": "tsx src/alpha/alphaCommands.ts reward-history",
+    "alpha:capital-report": "tsx src/alpha/alphaCommands.ts capital-report",
     "alpha:watch": "tsx src/alpha/alphaCommands.ts watch",
     "alpha:market": "tsx src/alpha/alphaCommands.ts market",
     "alpha:paper": "tsx src/alpha/alphaCommands.ts paper",
@@ -20,6 +21,7 @@
     "alpha:live-dry-run": "tsx src/alpha/alphaCommands.ts live-dry-run",
     "alpha:live": "tsx src/alpha/alphaCommands.ts live",
     "alpha:resolved-asset-cleanup": "tsx src/alpha/alphaCommands.ts resolved-asset-cleanup",
+    "alpha:cancel-order": "tsx src/alpha/alphaCommands.ts cancel-order",
     "alpha:cron": "tsx src/alpha/alphaCron.ts",
     "alpha:cron:paper": "ALPHA_CRON_COMMAND=\"npm run alpha:paper\" tsx src/alpha/alphaCron.ts",
     "alpha:cron:live-dry-run": "ALPHA_CRON_COMMAND=\"npm run alpha:live-dry-run\" tsx src/alpha/alphaCron.ts",
@@ -43,7 +45,8 @@
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/alpha/capitalLedger.test.ts"
   },
   "keywords": [],
   "author": "",

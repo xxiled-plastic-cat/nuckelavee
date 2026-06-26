@@ -4,6 +4,23 @@ import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaQuo
 
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
 
+const POOL_FALLBACK_DAILY_SOURCE = "totalRewards-pool-fallback";
+
+/**
+ * Whether the reward lane should commit capital to this market. We only farm
+ * markets that advertise a genuine, non-zero daily emission. When the API does
+ * not expose a real daily figure the client falls back to treating the whole
+ * reward pool as a "daily" number, which massively overstates the rate; such
+ * markets historically pay ~$0, so the reward lane self-disables on them.
+ */
+export function rewardLaneAllowsMarket(market: AlphaMarket, config: AlphaConfig): boolean {
+  if (!market.reward.isRewardMarket) return false;
+  if (!config.rewardRequireRealDaily) return true;
+  const daily = market.reward.dailyRewardsUsd;
+  if (daily === undefined || daily <= 0) return false;
+  return market.reward.dailyRewardsSource !== POOL_FALLBACK_DAILY_SOURCE;
+}
+
 function getOutcomeBook(book: AlphaOrderbook, outcome: AlphaOutcome): { bid?: number; ask?: number; mid?: number; spread?: number } {
   return outcome === "YES"
     ? { bid: book.yesBid, ask: book.yesAsk, mid: book.yesMid, spread: book.yesSpread }
@@ -123,6 +140,7 @@ export function generateQuotes(
 ): AlphaQuote[] {
   const quotes: AlphaQuote[] = [];
   const rewardLaneEnabled = config.enableRewardLane;
+  const rewardLaneMarket = rewardLaneAllowsMarket(market, config);
   const spreadLaneEnabled = config.enableSpreadLane && config.enableSpreadCapture;
   const exitsEnabled = config.enableRewardLane || config.enableSpreadLane;
   for (const outcome of ["YES", "NO"] as const) {
@@ -137,7 +155,7 @@ export function generateQuotes(
     const spreadEntryMidpointAllowed = midpoint >= config.minSpreadEntryMidpoint && midpoint <= config.maxSpreadMidpoint;
     const spreadExitMidpointAllowed = midpoint >= config.minSpreadExitMidpoint && midpoint <= config.maxSpreadMidpoint;
     let bid =
-      rewardLaneEnabled && market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
+      rewardLaneEnabled && rewardLaneMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint - rewardBuffer
         : undefined;
     if (bid !== undefined && outcomeBook.ask !== undefined && bid >= outcomeBook.ask) {
@@ -149,18 +167,32 @@ export function generateQuotes(
       (rewardSpread === undefined || Math.abs(midpoint - bid) <= rewardSpread) &&
       (spread === undefined || spread * 100 >= config.minMakerSpreadCents || market.reward.isRewardMarket)
     ) {
-      const rewardNotionalUsd = laneNotionalUsd(
-        config.rewardTargetQuoteSizeUsd,
-        config.rewardMinOrderSizeUsd,
-        config.rewardMaxOrderSizeUsd,
-        true,
-      );
+      const rewardEligible =
+        market.reward.isRewardMarket &&
+        rewardSpread !== undefined &&
+        Math.abs(midpoint - bid) <= rewardSpread;
+      // Size reward bids so a single resting order satisfies the market's
+      // aggregate minimum-contract requirement on its own. A 0.5% buffer
+      // absorbs share-rounding so the placed order does not land fractionally
+      // under the minimum. If that minimum cannot be funded within the lane's
+      // max order size, emit no reward bid at all rather than resting capital
+      // that can never qualify for rewards.
+      const minContractsNotionalUsd =
+        rewardEligible && rewardMinContracts !== undefined ? rewardMinContracts * bid * 1.005 : 0;
+      const meetsMinWithinCap = minContractsNotionalUsd <= config.rewardMaxOrderSizeUsd + 1e-9;
+      const rewardNotionalUsd =
+        rewardEligible && rewardMinContracts !== undefined && !meetsMinWithinCap
+          ? undefined
+          : laneNotionalUsd(
+              Math.max(config.rewardTargetQuoteSizeUsd, minContractsNotionalUsd),
+              config.rewardMinOrderSizeUsd,
+              config.rewardMaxOrderSizeUsd,
+              true,
+            );
       const sized = rewardNotionalUsd === undefined ? undefined : quoteSize(bid, rewardNotionalUsd);
-      if (sized) {
-        const rewardEligible =
-          market.reward.isRewardMarket &&
-          rewardSpread !== undefined &&
-          Math.abs(midpoint - bid) <= rewardSpread;
+      const meetsMinContracts =
+        !rewardEligible || rewardMinContracts === undefined || (sized !== undefined && sized.sizeShares + 1e-9 >= rewardMinContracts);
+      if (sized && meetsMinContracts) {
         quotes.push({
           id: `${market.marketAppId}:${outcome}:bid:${Date.now()}`,
           marketId: market.id,

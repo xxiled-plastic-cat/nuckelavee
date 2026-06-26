@@ -193,6 +193,16 @@ export type AlphaBotState = {
   notificationState?: {
     lastDailySummaryDate?: string;
   };
+  capitalLedger?: {
+    lastScanAt: string;
+    rewardsReceivedUsd: number;
+    marketUsdcInUsd: number;
+    marketUsdcOutUsd: number;
+    externalInUsd: number;
+    externalOutUsd: number;
+    pagesScanned?: number;
+    transfersScanned?: number;
+  };
   lastUpdated: string;
 };
 

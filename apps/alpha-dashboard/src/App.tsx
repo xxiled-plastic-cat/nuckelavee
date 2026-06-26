@@ -90,7 +90,16 @@ export default function App() {
   const metrics = useMemo<MetricCard[]>(() => {
     if (!snapshot) return [];
     const positionLockedUsd = totalLockedUsd(snapshot.positions);
-    return [
+    const cards: MetricCard[] = [];
+    if (snapshot.realPnl) {
+      cards.push(
+        { label: "Real PnL", value: fmtUsd(snapshot.realPnl.realPnlUsd) },
+        { label: "Net Worth", value: fmtUsdAmount(snapshot.realPnl.netWorthUsd) },
+        { label: "Contributed Capital", value: fmtUsdAmount(snapshot.realPnl.contributedCapitalUsd) },
+        { label: "Rewards Received", value: fmtRewardUsd(snapshot.realPnl.rewardsReceivedUsd) },
+      );
+    }
+    cards.push(
       { label: "Trading PnL", value: fmtUsd(snapshot.overview.tradingPnl) },
       { label: "Estimated Rewards", value: fmtUsd(snapshot.overview.estimatedRewardsUsd) },
       { label: "Position Cost", value: fmtUsdAmount(positionLockedUsd) },
@@ -104,7 +113,8 @@ export default function App() {
       },
       { label: "Reward Liquidity Share", value: fmtPercent(snapshot.overview.activeRewardLiquidityShare) },
       { label: "Wallet USDC", value: fmtUsd(snapshot.walletBalances.usdc) },
-    ];
+    );
+    return cards;
   }, [snapshot]);
 
   return (
@@ -138,12 +148,38 @@ export default function App() {
 
             <section className="metrics-grid">
               {metrics.map((card) => (
-                <article key={card.label} className="metric-card card">
+                <article
+                  key={card.label}
+                  className={`metric-card card${card.label === "Real PnL" ? " metric-card-primary" : ""}`}
+                >
                   <h3>{card.label}</h3>
                   <p>{card.value}</p>
                 </article>
               ))}
             </section>
+
+            {snapshot.realPnl && (
+              <section className="card">
+                <h2>Real PnL Reconciliation</h2>
+                <ul className="reconciliation-list">
+                  <li>Wallet USDC: {fmtUsdAmount(snapshot.realPnl.walletUsdc)}</li>
+                  <li>Bid escrow USDC: {fmtUsdAmount(snapshot.realPnl.bidEscrowUsd)}</li>
+                  <li>Positions value: {fmtUsdAmount(snapshot.realPnl.positionsValueUsd)}</li>
+                  <li>Market USDC in (lifetime): {fmtUsdAmount(snapshot.realPnl.marketUsdcInUsd)}</li>
+                  <li>Market USDC out (lifetime): {fmtUsdAmount(snapshot.realPnl.marketUsdcOutUsd)}</li>
+                  <li>Trading PnL: {fmtUsd(snapshot.realPnl.tradingPnlUsd)}</li>
+                  {snapshot.realPnl.ledgerCachedAt && (
+                    <li>Flow data as of: {fmtTime(snapshot.realPnl.ledgerCachedAt)}</li>
+                  )}
+                </ul>
+                {Math.abs(snapshot.realPnl.externalCapitalDriftUsd) > 0.05 && (
+                  <p className="warning-inline">
+                    External capital drift: {fmtUsd(snapshot.realPnl.externalCapitalDriftUsd)} (expected ~$0 with fixed
+                    funding)
+                  </p>
+                )}
+              </section>
+            )}
 
             <section className="layout-grid">
               <article className="card table-card">

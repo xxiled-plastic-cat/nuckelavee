@@ -59,6 +59,7 @@ function normalizeAlphaState(parsed: AlphaBotState, startingBalance: number): Al
       ...parsed.strategyStats,
     },
     notificationState: parsed.notificationState ?? {},
+    capitalLedger: parsed.capitalLedger,
   };
 }
 

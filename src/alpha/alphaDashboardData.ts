@@ -2,8 +2,9 @@ import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 
 import { readAlphaConfig } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits } from "./alphaClient.js";
+import { buildCapitalLedger, mergeCapitalLedgerIntoState, type CapitalLedger } from "./capitalLedger.js";
 import { summarizeLiveExposure } from "./alphaFormatter.js";
-import { loadAlphaState } from "./alphaStateStore.js";
+import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaPaperOrder, AlphaPaperPosition } from "./alphaTypes.js";
 
 export type DashboardPositionRow = {
@@ -95,7 +96,42 @@ export type AlphaDashboardSnapshot = {
   positions: DashboardPositionRow[];
   openOrders: DashboardOpenOrderRow[];
   activity: DashboardActivityItem[];
+  realPnl?: DashboardRealPnl;
 };
+
+export type DashboardRealPnl = {
+  contributedCapitalUsd: number;
+  netWorthUsd?: number;
+  realPnlUsd?: number;
+  walletUsdc?: number;
+  bidEscrowUsd: number;
+  positionsValueUsd: number;
+  rewardsReceivedUsd: number;
+  marketUsdcInUsd: number;
+  marketUsdcOutUsd: number;
+  tradingPnlUsd: number;
+  estimatedRewardsUsd: number;
+  externalCapitalDriftUsd: number;
+  ledgerCachedAt?: string;
+};
+
+function toDashboardRealPnl(ledger: CapitalLedger): DashboardRealPnl {
+  return {
+    contributedCapitalUsd: ledger.contributedCapitalUsd,
+    netWorthUsd: ledger.netWorthUsd,
+    realPnlUsd: ledger.realPnlUsd,
+    walletUsdc: ledger.components.walletUsdc,
+    bidEscrowUsd: ledger.components.bidEscrowUsd,
+    positionsValueUsd: ledger.components.positionsValueUsd,
+    rewardsReceivedUsd: ledger.flows.rewardsReceivedUsd,
+    marketUsdcInUsd: ledger.flows.marketUsdcInUsd,
+    marketUsdcOutUsd: ledger.flows.marketUsdcOutUsd,
+    tradingPnlUsd: ledger.reconciliation.tradingPnlUsd,
+    estimatedRewardsUsd: ledger.reconciliation.estimatedRewardsUsd,
+    externalCapitalDriftUsd: ledger.reconciliation.externalCapitalDriftUsd,
+    ledgerCachedAt: ledger.scanMeta.cachedAt,
+  };
+}
 
 function toPositionRowsFromState(state: AlphaBotState): DashboardPositionRow[] {
   const rows: DashboardPositionRow[] = [];
@@ -361,6 +397,57 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
     errors.push("No wallet configured. Set ALPHA_WALLET_ADDRESS or pass ?wallet=<address>.");
   }
 
+  const positionRows = walletPositions
+    ? toPositionRowsFromWallet(
+        walletPositions,
+        slugByMarketAppId,
+        new Map(
+          Object.values(state.positionsByMarket)
+            .filter((position) => position.marketAppId !== undefined)
+            .map((position) => [position.marketAppId as number, position]),
+        ),
+      )
+    : toPositionRowsFromState(state);
+
+  const openOrderRows = walletOrders
+    ? toOpenOrderRowsFromWallet(
+        walletOrders,
+        slugByMarketAppId,
+        new Map(
+          state.openOrders
+            .filter((order) => order.status === "open" && order.liveEscrowAppId !== undefined)
+            .map((order) => [String(order.liveEscrowAppId), order]),
+        ),
+      )
+    : state.openOrders.filter((o) => o.status === "open").map(toOpenOrderRow);
+
+  const escrowAppIds = [
+    ...state.openOrders
+      .filter((order) => order.status === "open" && order.liveEscrowAppId !== undefined)
+      .map((order) => order.liveEscrowAppId as number),
+    ...(walletOrders ?? []).map((order) => order.escrowAppId),
+  ];
+
+  let realPnl: DashboardRealPnl | undefined;
+  try {
+    const ledger = await buildCapitalLedger({
+      config,
+      walletAddress,
+      walletUsdc,
+      bidEscrowUsd: exposure.bidExposureUsd,
+      positions: positionRows,
+      state,
+      marketAppIds: [...marketsByAppId.keys()],
+      escrowAppIds,
+    });
+    realPnl = toDashboardRealPnl(ledger);
+    if (ledger.flowsRefreshed) {
+      await saveAlphaState(config.stateKey, mergeCapitalLedgerIntoState(state, ledger.flows, ledger.scanMeta));
+    }
+  } catch (error) {
+    errors.push(`Real PnL ledger unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const snapshot: AlphaDashboardSnapshot = {
     asOf: new Date().toISOString(),
     botStateKey: config.stateKey,
@@ -405,29 +492,10 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
       liveOrdersPlaced: state.strategyStats.liveOrdersPlaced,
       liveOrdersCancelled: state.strategyStats.liveOrdersCancelled,
     },
-    positions: walletPositions
-      ? toPositionRowsFromWallet(
-          walletPositions,
-          slugByMarketAppId,
-          new Map(
-            Object.values(state.positionsByMarket)
-              .filter((position) => position.marketAppId !== undefined)
-              .map((position) => [position.marketAppId as number, position]),
-          ),
-        )
-      : toPositionRowsFromState(state),
-    openOrders: walletOrders
-      ? toOpenOrderRowsFromWallet(
-          walletOrders,
-          slugByMarketAppId,
-          new Map(
-            state.openOrders
-              .filter((order) => order.status === "open" && order.liveEscrowAppId !== undefined)
-              .map((order) => [String(order.liveEscrowAppId), order]),
-          ),
-        )
-      : state.openOrders.filter((o) => o.status === "open").map(toOpenOrderRow),
+    positions: positionRows,
+    openOrders: openOrderRows,
     activity: buildActivity(state),
+    realPnl,
   };
 
   cacheByWallet.set(key, {

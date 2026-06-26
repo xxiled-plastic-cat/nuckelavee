@@ -149,6 +149,26 @@ button:hover {
   font-weight: 600;
 }
 
+.metric-card-primary {
+  border-color: rgba(160, 220, 170, 0.45);
+  background: linear-gradient(180deg, rgba(72, 120, 88, 0.22), rgba(20, 24, 28, 0.5));
+}
+
+.metric-card-primary p {
+  color: #d8ffe2;
+}
+
+.reconciliation-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #c9c0ea;
+}
+
+.warning-inline {
+  margin-top: 0.75rem;
+  color: #ffd9a0;
+}
+
 .layout-grid {
   display: grid;
   gap: 1rem;

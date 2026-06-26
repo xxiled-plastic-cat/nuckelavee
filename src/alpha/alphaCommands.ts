@@ -6,7 +6,7 @@ import { AlphaSdkClient } from "./alphaClient.js";
 import { loadAlphaScan, type AlphaScanResult } from "./alphaMarketScanner.js";
 import { rankRewardCandidates } from "./alphaRewardScanner.js";
 import { scanParity } from "./alphaParityScanner.js";
-import { saveAlphaState } from "./alphaStateStore.js";
+import { saveAlphaState, loadAlphaState } from "./alphaStateStore.js";
 import {
   printLiveSummary,
   printMarketDetail,
@@ -23,14 +23,258 @@ import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
 import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
 import { runResolvedAssetCleanup } from "./alphaResolvedAssetCleanup.js";
+import { buildCapitalLedger, mergeCapitalLedgerIntoState, printCapitalLedgerReport, ALPHA_REWARD_HISTORY_SENDER } from "./capitalLedger.js";
+import { formatMicroUsdc, scanWalletUsdcTransfers } from "./indexerTransfers.js";
 import { closeDatabase } from "../db.js";
 import { isDebugModeEnabled } from "../utils/debugMode.js";
 
 dotenv.config();
 
 const DEFAULT_REWARD_HISTORY_RECEIVER = "65GJKPMEYLR2C2GHFIAUKF2CFDE6IXDB3LUTOVJ424LBMMEWJ6UXCHCBZQ";
-const DEFAULT_REWARD_HISTORY_SENDER = "LPCTQJDOFBG5J63LOUY6A6JMHHHXIVOIZ7FLN6FETFSSWQOJR56V65INTU";
-const MICRO = 1_000_000n;
+
+async function runRewardHistoryCommand(receiverArg: string | undefined, senderArg: string | undefined): Promise<void> {
+  const config = readAlphaConfig();
+  const receiver = (receiverArg || process.env.ALPHA_REWARD_HISTORY_RECEIVER || DEFAULT_REWARD_HISTORY_RECEIVER).trim();
+  const sender = (senderArg || ALPHA_REWARD_HISTORY_SENDER).trim();
+  if (!algosdk.isValidAddress(receiver)) {
+    throw new Error(`Invalid Algorand receiver address for rewards history: ${receiver}`);
+  }
+  if (!algosdk.isValidAddress(sender)) {
+    throw new Error(`Invalid Algorand sender address for rewards history: ${sender}`);
+  }
+
+  const scan = await scanWalletUsdcTransfers(receiver, config);
+  let incomingTransferCount = 0;
+  let incomingTotalMicroUsdc = 0n;
+  let rewardTransferCount = 0;
+  let rewardTotalMicroUsdc = 0n;
+
+  for (const transfer of scan.transfers) {
+    if (transfer.direction !== "in") continue;
+    incomingTotalMicroUsdc += transfer.amountMicroUsdc;
+    incomingTransferCount += 1;
+    if (transfer.sender === sender) {
+      rewardTotalMicroUsdc += transfer.amountMicroUsdc;
+      rewardTransferCount += 1;
+    }
+  }
+
+  console.log("NUCKELAVEE ALPHA REWARD HISTORY");
+  console.log("");
+  console.log(`Receiver: ${receiver}`);
+  console.log(`Reward sender filter: ${sender}`);
+  console.log(`USDC asset ID: ${config.usdcAssetId}`);
+  console.log(`Pages scanned: ${scan.pagesScanned}`);
+  console.log(`Transactions gathered before filtering: ${scan.transactionsScanned}`);
+  console.log(`Incoming USDC transfers (all senders): ${incomingTransferCount}`);
+  console.log(`Incoming USDC total (all senders): ${formatMicroUsdc(incomingTotalMicroUsdc)}`);
+  console.log(`Reward transfers (filtered sender): ${rewardTransferCount}`);
+  console.log(`Total rewards received: ${formatMicroUsdc(rewardTotalMicroUsdc)}`);
+}
+
+async function runCapitalReportCommand(): Promise<void> {
+  const config = readAlphaConfig();
+  const walletAddress = config.walletAddress;
+  if (!walletAddress || !algosdk.isValidAddress(walletAddress)) {
+    throw new Error("ALPHA_WALLET_ADDRESS or a mnemonic-derived address is required for capital-report");
+  }
+
+  const client = new AlphaSdkClient(config, false);
+  const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
+  const markets = await client.getLiveMarkets();
+  const marketAppIds = markets.map((market) => market.marketAppId);
+
+  let walletUsdc: number | undefined;
+  let walletOrders: Awaited<ReturnType<AlphaSdkClient["getWalletOpenOrders"]>> | undefined;
+  try {
+    walletUsdc = await client.getUsdcBalance(walletAddress);
+  } catch (error) {
+    console.warn(`Wallet USDC unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    walletOrders = await client.getWalletOpenOrders(walletAddress);
+  } catch (error) {
+    console.warn(`Wallet open orders unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const exposure = summarizeLiveExposure(state, config, { walletAddress });
+  const escrowAppIds = [
+    ...state.openOrders
+      .filter((order) => order.status === "open" && order.liveEscrowAppId !== undefined)
+      .map((order) => order.liveEscrowAppId as number),
+    ...(walletOrders ?? []).map((order) => order.escrowAppId),
+  ];
+
+  const ledger = await buildCapitalLedger({
+    config,
+    walletAddress,
+    walletUsdc,
+    bidEscrowUsd: exposure.bidExposureUsd,
+    positions: Object.values(state.positionsByMarket).flatMap((position) => {
+      const rows: Array<{ valueUsd?: number; lockedUsd?: number }> = [];
+      if (position.yesShares > 0) {
+        const mark = position.lastMark;
+        rows.push({
+          lockedUsd: position.avgYesCost * position.yesShares,
+          valueUsd: mark !== undefined ? mark * position.yesShares : undefined,
+        });
+      }
+      if (position.noShares > 0) {
+        const mark = position.lastMark !== undefined ? 1 - position.lastMark : undefined;
+        rows.push({
+          lockedUsd: position.avgNoCost * position.noShares,
+          valueUsd: mark !== undefined ? mark * position.noShares : undefined,
+        });
+      }
+      return rows;
+    }),
+    state,
+    marketAppIds,
+    escrowAppIds,
+    forceRefresh: true,
+  });
+
+  const updatedState = mergeCapitalLedgerIntoState(state, ledger.flows, ledger.scanMeta);
+  await saveAlphaState(config.stateKey, updatedState);
+  printCapitalLedgerReport(ledger, walletAddress);
+}
+
+type CancelOrderArgs = {
+  marketAppId?: number;
+  slug?: string;
+  escrowAppId?: number;
+  execute: boolean;
+};
+
+function parseCancelOrderArgs(args: string[]): CancelOrderArgs {
+  const parsed: CancelOrderArgs = { execute: false };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--execute") {
+      parsed.execute = true;
+      continue;
+    }
+    if (arg === "--escrow" || arg === "--escrow-app-id") {
+      const value = args[i + 1];
+      if (!value) throw new Error(`Missing value for ${arg}`);
+      const num = Number.parseInt(value, 10);
+      if (!Number.isFinite(num) || num <= 0) throw new Error(`Invalid escrow app id: ${value}`);
+      parsed.escrowAppId = num;
+      i += 1;
+      continue;
+    }
+    if (arg === "--market" || arg === "--market-app-id") {
+      const value = args[i + 1];
+      if (!value) throw new Error(`Missing value for ${arg}`);
+      i += 1;
+      const num = Number.parseInt(value, 10);
+      if (Number.isFinite(num) && String(num) === value.trim()) parsed.marketAppId = num;
+      else parsed.slug = value.trim();
+      continue;
+    }
+    // Bare positional: numeric -> market app id, otherwise slug.
+    const num = Number.parseInt(arg, 10);
+    if (Number.isFinite(num) && String(num) === arg.trim()) parsed.marketAppId = num;
+    else parsed.slug = arg.trim();
+  }
+  if (parsed.marketAppId === undefined && parsed.slug === undefined && parsed.escrowAppId === undefined) {
+    throw new Error("Usage: npm run alpha:cancel-order -- <marketAppId|slug> [--escrow <escrowAppId>] [--execute]");
+  }
+  return parsed;
+}
+
+async function runCancelOrderCommand(args: string[]): Promise<void> {
+  const parsed = parseCancelOrderArgs(args);
+  const config = readAlphaConfig();
+  const walletAddress = config.walletAddress;
+  if (!walletAddress || !algosdk.isValidAddress(walletAddress)) {
+    throw new Error("ALPHA_WALLET_ADDRESS or a mnemonic-derived address is required for cancel-order");
+  }
+  if (parsed.execute && !config.walletMnemonic) {
+    throw new Error("ALPHA_WALLET_MNEMONIC or PAYER_MNEMONIC is required to --execute a cancel");
+  }
+
+  const client = new AlphaSdkClient(config, parsed.execute);
+
+  let marketAppId = parsed.marketAppId;
+  if (marketAppId === undefined && parsed.slug) {
+    const market = await client.getMarket(parsed.slug);
+    if (!market) throw new Error(`Alpha market not found for slug/id: ${parsed.slug}`);
+    marketAppId = market.marketAppId;
+  }
+
+  const walletOrders = await client.getWalletOpenOrders(walletAddress);
+  const matches = walletOrders.filter((order) => {
+    if (parsed.escrowAppId !== undefined && order.escrowAppId !== parsed.escrowAppId) return false;
+    if (marketAppId !== undefined && order.marketAppId !== marketAppId) return false;
+    return true;
+  });
+
+  console.log("NUCKELAVEE ALPHA CANCEL ORDER");
+  console.log("");
+  console.log(`Wallet: ${walletAddress}`);
+  console.log(`Filter: marketAppId=${marketAppId ?? "any"} escrowAppId=${parsed.escrowAppId ?? "any"}`);
+  console.log(`Mode: ${parsed.execute ? "EXECUTE (live on-chain cancel)" : "dry-run (no changes)"}`);
+  console.log(`Matching open orders: ${matches.length}`);
+  console.log("");
+
+  if (matches.length === 0) {
+    console.log("No matching open orders found; nothing to cancel.");
+    return;
+  }
+
+  for (const order of matches) {
+    const price = (order.price ?? 0) / 1_000_000;
+    const qty = (order.quantity ?? 0) / 1_000_000;
+    const filled = (order.quantityFilled ?? 0) / 1_000_000;
+    const remaining = Math.max(0, qty - filled);
+    const sideLabel = order.side === 1 ? "bid" : "ask";
+    const outcomeLabel = order.position === 1 ? "YES" : "NO";
+    console.log(
+      `  marketAppId=${order.marketAppId} escrowAppId=${order.escrowAppId} ${outcomeLabel} ${sideLabel} price=${price.toFixed(
+        3,
+      )} remaining=${remaining.toFixed(6)} notional=$${(price * remaining).toFixed(2)}`,
+    );
+  }
+  console.log("");
+
+  if (!parsed.execute) {
+    console.log("Dry-run only. Re-run with --execute to cancel the orders above.");
+    return;
+  }
+
+  const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
+  let cancelled = 0;
+  for (const order of matches) {
+    try {
+      const result = await client.cancelOrder({
+        marketAppId: order.marketAppId,
+        escrowAppId: order.escrowAppId,
+        orderOwner: order.owner ?? walletAddress,
+      });
+      if (result.success) {
+        cancelled += 1;
+        const now = new Date().toISOString();
+        for (const tracked of state.openOrders) {
+          if (tracked.liveEscrowAppId === order.escrowAppId && tracked.status === "open") {
+            tracked.status = "cancelled";
+            tracked.updatedAt = now;
+            state.cancelledOrders.push({ ...tracked });
+          }
+        }
+        console.log(`[CANCELLED] escrowAppId=${order.escrowAppId} (marketAppId=${order.marketAppId})`);
+      } else {
+        console.log(`[FAILED] escrowAppId=${order.escrowAppId}: cancel returned success=false`);
+      }
+    } catch (error) {
+      console.log(`[FAILED] escrowAppId=${order.escrowAppId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  state.openOrders = state.openOrders.filter((order) => order.status === "open");
+  await saveAlphaState(config.stateKey, state);
+  console.log("");
+  console.log(`Cancelled ${cancelled}/${matches.length} matching order(s); bot state updated.`);
+}
 
 function logStartupDebug(message: string): void {
   if (!isDebugModeEnabled()) return;
@@ -122,149 +366,6 @@ async function runMarketCommand(arg: string | undefined): Promise<void> {
   if (!market) throw new Error(`Alpha market not found: ${arg}`);
   const book = await client.getOrderbook(market);
   printMarketDetail(market, book);
-}
-
-function formatMicroUsdc(value: bigint): string {
-  const whole = value / MICRO;
-  const fraction = (value % MICRO).toString().padStart(6, "0");
-  return `${whole.toString()}.${fraction}`;
-}
-
-function parseNextToken(response: Record<string, unknown>): string | undefined {
-  const nextToken = response["next-token"];
-  if (typeof nextToken === "string" && nextToken.length > 0) return nextToken;
-  const next = response.next;
-  if (typeof next === "string" && next.length > 0) return next;
-  const camel = response.nextToken;
-  if (typeof camel === "string" && camel.length > 0) return camel;
-  return undefined;
-}
-
-function parseBigIntAmount(value: unknown): bigint | undefined {
-  if (typeof value === "bigint") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return BigInt(Math.floor(value));
-  if (typeof value === "string" && value.length > 0) {
-    try {
-      return BigInt(value);
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-type ParsedAssetTransfer = {
-  sender?: string;
-  receiver?: string;
-  assetId?: bigint;
-  amount?: bigint;
-};
-
-function collectAssetTransfers(txn: Record<string, unknown>, inheritedSender?: string): ParsedAssetTransfer[] {
-  const transfers: ParsedAssetTransfer[] = [];
-  const sender = typeof txn.sender === "string" ? txn.sender : inheritedSender;
-  const transfer = txn["assetTransferTransaction"];
-  if (transfer && typeof transfer === "object") {
-    const payload = transfer as Record<string, unknown>;
-    const parsed: ParsedAssetTransfer = {
-      sender: typeof payload.sender === "string" ? payload.sender : sender,
-      receiver: typeof payload.receiver === "string" ? payload.receiver : undefined,
-      assetId: parseBigIntAmount(payload["assetId"] ?? payload.assetId),
-      amount: parseBigIntAmount(payload.amount),
-    };
-    transfers.push(parsed);
-  }
-  const inner = txn["innerTxns"];
-  if (Array.isArray(inner)) {
-    for (const child of inner) {
-      if (child && typeof child === "object") {
-        transfers.push(...collectAssetTransfers(child as Record<string, unknown>, sender));
-      }
-    }
-  }
-  return transfers;
-}
-
-async function runRewardHistoryCommand(receiverArg: string | undefined, senderArg: string | undefined): Promise<void> {
-  const config = readAlphaConfig();
-  const receiver = (receiverArg || process.env.ALPHA_REWARD_HISTORY_RECEIVER || DEFAULT_REWARD_HISTORY_RECEIVER).trim();
-  const sender = (senderArg || process.env.ALPHA_REWARD_HISTORY_SENDER || DEFAULT_REWARD_HISTORY_SENDER).trim();
-  if (!algosdk.isValidAddress(receiver)) {
-    throw new Error(`Invalid Algorand receiver address for rewards history: ${receiver}`);
-  }
-  if (!algosdk.isValidAddress(sender)) {
-    throw new Error(`Invalid Algorand sender address for rewards history: ${sender}`);
-  }
-
-  const indexer = new algosdk.Indexer(config.algodToken ?? "", config.indexerServer, "");
-  let nextToken: string | undefined;
-  let pageCount = 0;
-  let transactionCount = 0;
-  let incomingTransferCount = 0;
-  let incomingTotalMicroUsdc = 0n;
-  let rewardTransferCount = 0;
-  let rewardTotalMicroUsdc = 0n;
-  let pageLimit = 200;
-
-  while (true) {
-    let response: Record<string, unknown> | undefined;
-    let attempts = 0;
-    while (!response) {
-      attempts += 1;
-      try {
-        let query = indexer.searchForTransactions().address(receiver).limit(pageLimit);
-        if (nextToken) {
-          query = query.nextToken(nextToken);
-        }
-        response = (await query.do()) as unknown as Record<string, unknown>;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const timedOut = message.toLowerCase().includes("statement timeout");
-        if (!timedOut || attempts >= 4) {
-          throw new Error(
-            `Reward history scan failed on page ${pageCount + 1} (next=${nextToken ?? "none"}, limit=${pageLimit}): ${message}`,
-          );
-        }
-        pageLimit = Math.max(25, Math.floor(pageLimit / 2));
-        await new Promise((resolve) => setTimeout(resolve, 500 * attempts));
-      }
-    }
-    const transactions = Array.isArray(response.transactions) ? response.transactions : [];
-    pageCount += 1;
-    transactionCount += transactions.length;
-
-    for (const transaction of transactions as Array<Record<string, unknown>>) {
-      const transfers = collectAssetTransfers(transaction);
-      for (const transfer of transfers) {
-        if (transfer.receiver !== receiver) continue;
-        if (transfer.assetId !== BigInt(config.usdcAssetId)) continue;
-        if (transfer.amount === undefined) continue;
-        const amount = transfer.amount;
-        incomingTotalMicroUsdc += amount;
-        incomingTransferCount += 1;
-        if (transfer.sender === sender) {
-          rewardTotalMicroUsdc += amount;
-          rewardTransferCount += 1;
-        }
-      }
-    }
-
-    const parsedNext = parseNextToken(response);
-    if (!parsedNext || parsedNext === nextToken || transactions.length === 0) break;
-    nextToken = parsedNext;
-  }
-
-  console.log("NUCKELAVEE ALPHA REWARD HISTORY");
-  console.log("");
-  console.log(`Receiver: ${receiver}`);
-  console.log(`Reward sender filter: ${sender}`);
-  console.log(`USDC asset ID: ${config.usdcAssetId}`);
-  console.log(`Pages scanned: ${pageCount}`);
-  console.log(`Transactions gathered before filtering: ${transactionCount}`);
-  console.log(`Incoming USDC transfers (all senders): ${incomingTransferCount}`);
-  console.log(`Incoming USDC total (all senders): ${formatMicroUsdc(incomingTotalMicroUsdc)}`);
-  console.log(`Reward transfers (filtered sender): ${rewardTransferCount}`);
-  console.log(`Total rewards received: ${formatMicroUsdc(rewardTotalMicroUsdc)}`);
 }
 
 async function runPaperCommand(): Promise<void> {
@@ -563,10 +664,11 @@ async function runResolvedAssetCleanupCommand(args: string[]): Promise<void> {
 
 function printUsage(): void {
   console.log(
-    "Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|reward-history|watch|market|paper|paper-watch|paper-report|live-dry-run|live|resolved-asset-cleanup>",
+    "Usage: tsx src/alpha/alphaCommands.ts <scan|rewards|reward-history|capital-report|watch|market|paper|paper-watch|paper-report|live-dry-run|live|resolved-asset-cleanup|cancel-order>",
   );
   console.log("  reward-history args: [receiverAddress] [rewardSenderAddress]");
   console.log("  resolved-asset-cleanup args: [--execute] [--limit N]");
+  console.log("  cancel-order args: <marketAppId|slug> [--escrow <escrowAppId>] [--execute]");
 }
 
 async function main(): Promise<void> {
@@ -578,6 +680,7 @@ async function main(): Promise<void> {
   if (command === "scan") return runScanCommand();
   if (command === "rewards") return runRewardsCommand();
   if (command === "reward-history") return runRewardHistoryCommand(process.argv[3], process.argv[4]);
+  if (command === "capital-report") return runCapitalReportCommand();
   if (command === "watch") return runPaperWatchCommand();
   if (command === "market") return runMarketCommand(process.argv[3]);
   if (command === "paper") return runPaperCommand();
@@ -586,6 +689,7 @@ async function main(): Promise<void> {
   if (command === "live-dry-run") return runLiveCommand("live-dry-run");
   if (command === "live") return runLiveCommand("live");
   if (command === "resolved-asset-cleanup") return runResolvedAssetCleanupCommand(process.argv.slice(3));
+  if (command === "cancel-order") return runCancelOrderCommand(process.argv.slice(3));
   printUsage();
   process.exitCode = 1;
 }

@@ -5,7 +5,7 @@ import { checkQuoteRisk } from "./alphaRiskManager.js";
 import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaPaperPosition, AlphaQuote } from "./alphaTypes.js";
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
-import { generateQuotes } from "./quoteEngine.js";
+import { generateQuotes, rewardLaneAllowsMarket } from "./quoteEngine.js";
 import { runParityLane } from "./parityTrader.js";
 import { runInventoryMergeLane } from "./inventoryMerger.js";
 import { runResolvedClaimLane } from "./resolvedClaimLane.js";
@@ -1167,7 +1167,25 @@ export async function runLiveTick(
     const book = scan.orderbooks.get(order.marketAppId);
     const intended = intendedQuoteByKey.get(quoteKey(order));
     const ageSeconds = orderAgeSeconds(order);
-    if (intended && isEquivalentQuote(order, intended, config)) {
+    const inRewardZone = rewardOrderInsideCurrentZone(order, market, book);
+    const rewardMinContracts = rewardMinContractsForOrder(order, market);
+    const aggregateRewardContracts = retainedRewardContracts.get(order.marketAppId) ?? 0;
+    // A reward order only earns if the market's aggregate in-zone contracts meet
+    // the market minimum. When the whole market's reward liquidity is below that
+    // minimum, none of those orders earn, so a sub-minimum reward order must not
+    // be kept resting (it would otherwise lock capital for zero reward forever).
+    const rewardBelowMinimum =
+      order.source === "reward" &&
+      rewardMinContracts !== undefined &&
+      aggregateRewardContracts + 1e-9 < rewardMinContracts;
+    // A reward order in a market that no longer qualifies for the reward lane
+    // (e.g. only a fabricated pool-fallback daily rate) earns nothing and must
+    // not be kept resting. Only act when the market is in this scan to avoid
+    // cancelling on a transient missing-market read.
+    const rewardLaneDisallowed =
+      order.source === "reward" && market !== undefined && !rewardLaneAllowsMarket(market, config);
+    const rewardShouldDrop = rewardBelowMinimum || rewardLaneDisallowed;
+    if (intended && isEquivalentQuote(order, intended, config) && !rewardShouldDrop) {
       order.reason = intended.reason;
       order.rewardEligible = intended.rewardEligible;
       order.rewardZoneDistanceCents = intended.rewardZoneDistanceCents;
@@ -1180,14 +1198,11 @@ export async function runLiveTick(
       });
       continue;
     }
-    const inRewardZone = rewardOrderInsideCurrentZone(order, market, book);
-    const rewardMinContracts = rewardMinContractsForOrder(order, market);
-    const aggregateRewardContracts = retainedRewardContracts.get(order.marketAppId) ?? 0;
     const supportsRewardThreshold =
       rewardMinContracts !== undefined &&
       aggregateRewardContracts >= rewardMinContracts &&
       aggregateRewardContracts - order.remainingShares < rewardMinContracts;
-    if (inRewardZone && ageSeconds < config.rewardMinDwellSeconds) {
+    if (!rewardShouldDrop && inRewardZone && ageSeconds < config.rewardMinDwellSeconds) {
       actions.push({
         kind: "skip",
         message: `Kept reward-eligible order escrowAppId=${escrowAppId}; resting ${Math.floor(ageSeconds)}/${
@@ -1196,7 +1211,7 @@ export async function runLiveTick(
       });
       continue;
     }
-    if (inRewardZone && supportsRewardThreshold) {
+    if (!rewardShouldDrop && inRewardZone && supportsRewardThreshold) {
       actions.push({
         kind: "skip",
         message: `Kept reward-eligible order escrowAppId=${escrowAppId}; contributes to aggregate minimum ${rewardMinContracts?.toFixed(
@@ -1205,11 +1220,15 @@ export async function runLiveTick(
       });
       continue;
     }
-    const reason = intended
-      ? `current quote moved ${quoteDeltaCents(order, intended).toFixed(2)}c`
-      : "market no longer has a qualifying quote";
+    const reason = rewardLaneDisallowed
+      ? "reward market has no genuine daily emission (pool-fallback only); order earns nothing"
+      : rewardBelowMinimum
+        ? `reward market aggregate ${aggregateRewardContracts.toFixed(6)} below minimum ${rewardMinContracts?.toFixed(6)} contract(s); order earns nothing`
+        : intended
+          ? `current quote moved ${quoteDeltaCents(order, intended).toFixed(2)}c`
+          : "market no longer has a qualifying quote";
     if (order.source === "reward" && order.side === "bid" && ageSeconds < config.rewardMinDwellSeconds) {
-      if (inRewardZone) continue;
+      if (inRewardZone && !rewardShouldDrop) continue;
       actions.push({
         kind: "skip",
         message: `Reward order escrowAppId=${escrowAppId} is under minimum dwell but outside current reward zone; allowing refresh`,

@@ -21,6 +21,7 @@ export type AlphaConfig = {
   rewardZoneBufferCents: number;
   maxRewardCompetition: "low" | "medium" | "high";
   enableRewardLane: boolean;
+  rewardRequireRealDaily: boolean;
   rewardTargetQuoteSizeUsd: number;
   rewardMinOrderSizeUsd: number;
   rewardMaxOrderSizeUsd: number;
@@ -149,6 +150,7 @@ export function readAlphaConfig(): AlphaConfig {
     rewardZoneBufferCents: readNumber("ALPHA_REWARD_ZONE_BUFFER_CENTS", 0.5),
     maxRewardCompetition: readCompetition("ALPHA_MAX_REWARD_COMPETITION", "medium"),
     enableRewardLane: readBool("ALPHA_ENABLE_REWARD_LANE", true),
+    rewardRequireRealDaily: readBool("ALPHA_REWARD_REQUIRE_REAL_DAILY", true),
     rewardTargetQuoteSizeUsd: readNumber("ALPHA_REWARD_TARGET_QUOTE_SIZE_USD", readNumber("ALPHA_TARGET_QUOTE_SIZE_USD", 3)),
     rewardMinOrderSizeUsd: readNumber("ALPHA_REWARD_MIN_ORDER_SIZE_USD", readNumber("ALPHA_TARGET_QUOTE_SIZE_USD", 3)),
     rewardMaxOrderSizeUsd: readNumber("ALPHA_REWARD_MAX_ORDER_SIZE_USD", readNumber("ALPHA_MAX_ORDER_SIZE_USD", 3)),
