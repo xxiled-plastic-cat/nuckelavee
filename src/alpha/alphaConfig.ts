@@ -45,6 +45,7 @@ export type AlphaConfig = {
   minMakerSpreadCents: number;
   enableSpreadLane: boolean;
   enableSpreadCapture: boolean;
+  actualRewardRefreshInLive: boolean;
   spreadTargetOrderSizeUsd: number;
   spreadMinOrderSizeUsd: number;
   spreadMaxOrderSizeUsd: number;
@@ -177,6 +178,7 @@ export function readAlphaConfig(): AlphaConfig {
     minMakerSpreadCents: readNumber("ALPHA_MIN_MAKER_SPREAD_CENTS", 4),
     enableSpreadLane: readBool("ALPHA_ENABLE_SPREAD_LANE", true),
     enableSpreadCapture: readBool("ALPHA_ENABLE_SPREAD_CAPTURE", true),
+    actualRewardRefreshInLive: readBool("ALPHA_ACTUAL_REWARD_REFRESH_IN_LIVE", false),
     spreadTargetOrderSizeUsd: readNumber("ALPHA_SPREAD_TARGET_ORDER_SIZE_USD", readNumber("ALPHA_SPREAD_ORDER_SIZE_USD", 1)),
     spreadMinOrderSizeUsd: readNumber("ALPHA_SPREAD_MIN_ORDER_SIZE_USD", readNumber("ALPHA_SPREAD_ORDER_SIZE_USD", 1)),
     spreadMaxOrderSizeUsd: readNumber("ALPHA_SPREAD_MAX_ORDER_SIZE_USD", readNumber("ALPHA_MAX_ORDER_SIZE_USD", 3)),

@@ -401,6 +401,17 @@ function spreadQuoteQuality(quote: AlphaQuote, state: AlphaBotState): number {
   return Math.log10((stats.volume ?? 0) + 1) * 10 + (stats.bestDepthUsd ?? 0) + (stats.bestSpreadCents ?? 0);
 }
 
+function shouldTrackSpreadStats(config: AlphaConfig): boolean {
+  return config.enableSpreadLane && config.enableSpreadCapture;
+}
+
+function pruneSpreadStatsWhenDisabled(state: AlphaBotState, config: AlphaConfig): number {
+  if (shouldTrackSpreadStats(config)) return 0;
+  const previous = Object.keys(state.spreadStatsByMarket).length;
+  if (previous > 0) state.spreadStatsByMarket = {};
+  return previous;
+}
+
 function findMarketForPosition(
   position: AlphaBotState["positionsByMarket"][string],
   marketByAppId: Map<number, AlphaMarket>,
@@ -714,6 +725,7 @@ async function refreshActualRewardsReceived(input: {
 }): Promise<void> {
   const { config, mode, state, marketAppIds, walletOrders, actions } = input;
   if (mode !== "live" || !config.walletAddress) return;
+  if (!config.actualRewardRefreshInLive) return;
   const lastScan = state.capitalLedger?.lastScanAt ? Date.parse(state.capitalLedger.lastScanAt) : 0;
   const fresh = Number.isFinite(lastScan) && Date.now() - lastScan < ACTUAL_REWARD_REFRESH_MS;
   if (fresh) return;
@@ -1137,14 +1149,22 @@ export async function runLiveTick(
   if (mode === "live") validateLiveConfig(config);
   if (!config.walletAddress) throw new Error(`${mode} requires ALPHA_WALLET_ADDRESS or mnemonic-derived address`);
 
+  const actions: LiveAction[] = [];
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
   logLiveMemory("after_state_load", {
     openOrders: state.openOrders.length,
     positions: Object.keys(state.positionsByMarket).length,
+    spreadStats: Object.keys(state.spreadStatsByMarket).length,
     fills: state.fills.length,
     cancelled: state.cancelledOrders.length,
   });
-  const actions: LiveAction[] = [];
+  const prunedSpreadStats = pruneSpreadStatsWhenDisabled(state, config);
+  if (prunedSpreadStats > 0) {
+    actions.push({
+      kind: "skip",
+      message: `Spread guardrails disabled; pruned ${prunedSpreadStats} spread market stat row(s) from persisted state`,
+    });
+  }
   const liveClient = new AlphaSdkClient(config, mode === "live");
   const marketByAppId = new Map<number, AlphaMarket>();
   for (const market of [...scan.markets, ...scan.rewardMarkets]) {
@@ -1228,9 +1248,14 @@ export async function runLiveTick(
   });
   updateUnrealisedPnl(state, scan.orderbooks);
   logLiveMemory("after_unrealised_pnl", { unrealisedPnl: state.unrealisedPnl.toFixed(6) });
-  const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
-  actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
-  logLiveMemory("after_spread_stats", { spreadStatsUpdated });
+  const spreadStatsUpdated = shouldTrackSpreadStats(config) ? updateSpreadMarketStats(state, scan, marketByAppId, config) : 0;
+  actions.push({
+    kind: "skip",
+    message: shouldTrackSpreadStats(config)
+      ? `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)`
+      : "Spread guardrails disabled; skipped market health stats update",
+  });
+  logLiveMemory("after_spread_stats", { spreadStatsUpdated, spreadStats: Object.keys(state.spreadStatsByMarket).length });
   const allExecutionLanesDisabled = !config.enableRewardLane && !config.enableSpreadLane && !config.enableParityLane;
   if (allExecutionLanesDisabled) {
     actions.push({
