@@ -13,8 +13,29 @@ import { updateUnrealisedPnl } from "./pnlTracker.js";
 import { accrueEstimatedRewards } from "./rewardTracker.js";
 import { buildCapitalLedger, mergeCapitalLedgerIntoState } from "./capitalLedger.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
+import { isDebugModeEnabled } from "../utils/debugMode.js";
 
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
+
+function fmtMemoryMb(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1);
+}
+
+function logLiveMemory(phase: string, details: Record<string, number | string | boolean | undefined> = {}): void {
+  if (!isDebugModeEnabled()) return;
+  const memory = process.memoryUsage();
+  const detailText = Object.entries(details)
+    .filter((entry): entry is [string, number | string | boolean] => entry[1] !== undefined)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(" ");
+  console.log(
+    `[startup-debug ${new Date().toISOString()}] [live-memory] phase="${phase}" rss_mb=${fmtMemoryMb(
+      memory.rss,
+    )} heap_used_mb=${fmtMemoryMb(memory.heapUsed)} heap_total_mb=${fmtMemoryMb(memory.heapTotal)} external_mb=${fmtMemoryMb(
+      memory.external,
+    )} array_buffers_mb=${fmtMemoryMb(memory.arrayBuffers)}${detailText ? ` ${detailText}` : ""}`,
+  );
+}
 
 export type LiveAction = {
   kind: "place" | "cancel" | "skip" | "parity" | "merge" | "claim";
@@ -1107,18 +1128,32 @@ export async function runLiveTick(
   config: AlphaConfig,
   mode: Extract<AlphaMode, "live-dry-run" | "live">,
 ): Promise<LiveTickResult> {
+  logLiveMemory("live_tick_start", {
+    mode,
+    markets: scan.markets.length,
+    rewardMarkets: scan.rewardMarkets.length,
+    orderbooks: scan.orderbooks.size,
+  });
   if (mode === "live") validateLiveConfig(config);
   if (!config.walletAddress) throw new Error(`${mode} requires ALPHA_WALLET_ADDRESS or mnemonic-derived address`);
 
   const state = await loadAlphaState(config.stateKey, config.paperStartingBalanceUsd);
+  logLiveMemory("after_state_load", {
+    openOrders: state.openOrders.length,
+    positions: Object.keys(state.positionsByMarket).length,
+    fills: state.fills.length,
+    cancelled: state.cancelledOrders.length,
+  });
   const actions: LiveAction[] = [];
   const liveClient = new AlphaSdkClient(config, mode === "live");
   const marketByAppId = new Map<number, AlphaMarket>();
   for (const market of [...scan.markets, ...scan.rewardMarkets]) {
     marketByAppId.set(market.marketAppId, market);
   }
+  logLiveMemory("after_market_map", { marketMap: marketByAppId.size });
 
   const beforePositions = snapshotPositions(state);
+  logLiveMemory("after_position_snapshot", { snapshotPositions: Object.keys(beforePositions).length });
   let walletOrders: OpenOrder[] = [];
   try {
     walletOrders = await loadWalletOpenOrders(liveClient, config.walletAddress, marketByAppId);
@@ -1130,8 +1165,10 @@ export async function runLiveTick(
     if (mode === "live") await saveAlphaState(config.stateKey, state);
     return finalLiveTickResult(liveClient, config, actions, state, { refreshBalances: false });
   }
+  logLiveMemory("after_wallet_open_orders", { walletOrders: walletOrders.length });
   const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
+  logLiveMemory("after_merge_live_orders", { syncedLiveOrders, closedOrders: closedOrders.length, stateOpenOrders: state.openOrders.length });
   let walletPositions: PositionSnapshot = {};
   let rawWalletPositions: WalletPosition[] = [];
   let positionsSynced = false;
@@ -1147,11 +1184,21 @@ export async function runLiveTick(
     console.error(`[alpha-live] position sync failed: ${message}`);
     actions.push({ kind: "skip", message: `Position sync skipped: ${message}` });
   }
+  logLiveMemory("after_wallet_positions", {
+    positionsSynced,
+    walletPositions: rawWalletPositions.length,
+    statePositions: Object.keys(state.positionsByMarket).length,
+  });
   if (positionsSynced) {
     inferClosedLiveOrders(state, closedOrders, beforePositions, walletPositions, actions);
   } else {
     state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
   }
+  logLiveMemory("after_fill_inference", {
+    fills: state.fills.length,
+    cancelled: state.cancelledOrders.length,
+    actions: actions.length,
+  });
   if (positionsSynced && rawWalletPositions.length > 0) {
     actions.push(
       ...(await runInventoryMergeLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
@@ -1160,18 +1207,30 @@ export async function runLiveTick(
       ...(await runResolvedClaimLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
     );
   }
+  logLiveMemory("after_recycling_lanes", { actions: actions.length });
   if (positionsSynced) {
     await reconcilePositions({ liveClient, config, mode, state, walletPositions: rawWalletPositions, walletOrders, actions });
   }
+  logLiveMemory("after_position_reconcile", {
+    positions: Object.keys(state.positionsByMarket).length,
+    actions: actions.length,
+  });
   accrueEstimatedRewards(state, config, Date.now(), {
     markets: [...scan.rewardMarkets, ...scan.markets],
     orderbooks: scan.orderbooks,
     walletAddress: config.walletAddress,
   });
+  logLiveMemory("after_reward_accrual", { estimatedRewardsUsd: state.estimatedRewardsUsd.toFixed(6) });
   await refreshActualRewardsReceived({ config, mode, state, marketAppIds: [...marketByAppId.keys()], walletOrders, actions });
+  logLiveMemory("after_actual_reward_refresh", {
+    rewardsReceivedUsd: state.capitalLedger?.rewardsReceivedUsd?.toFixed(6),
+    actions: actions.length,
+  });
   updateUnrealisedPnl(state, scan.orderbooks);
+  logLiveMemory("after_unrealised_pnl", { unrealisedPnl: state.unrealisedPnl.toFixed(6) });
   const spreadStatsUpdated = updateSpreadMarketStats(state, scan, marketByAppId, config);
   actions.push({ kind: "skip", message: `Spread guardrails: updated ${spreadStatsUpdated} market health observation(s)` });
+  logLiveMemory("after_spread_stats", { spreadStatsUpdated });
   const allExecutionLanesDisabled = !config.enableRewardLane && !config.enableSpreadLane && !config.enableParityLane;
   if (allExecutionLanesDisabled) {
     actions.push({
@@ -1198,6 +1257,13 @@ export async function runLiveTick(
       quotes.push(quote);
     }
   }
+  logLiveMemory("after_quote_generation", {
+    quotes: quotes.length,
+    blockedSpreadEntries,
+    rewardQuotes: quotes.filter((quote) => quote.source === "reward").length,
+    spreadQuotes: quotes.filter((quote) => quote.source === "spread").length,
+    exitQuotes: quotes.filter((quote) => quote.source === "inventory_exit").length,
+  });
   actions.push({
     kind: "skip",
     message: `Generated ${quotes.length} quote candidate(s): reward=${quotes.filter((quote) => quote.source === "reward").length}, spread=${
@@ -1205,10 +1271,12 @@ export async function runLiveTick(
     }, exits=${quotes.filter((quote) => quote.source === "inventory_exit").length}, blockedSpreadEntries=${blockedSpreadEntries}`,
   });
   addInventoryExitDiagnostics(actions, state, quotes, scan, marketByAppId, config);
+  logLiveMemory("after_inventory_exit_diagnostics", { actions: actions.length });
   const intendedQuoteByKey = new Map<string, AlphaQuote>();
   for (const quote of quotes) {
     if (!intendedQuoteByKey.has(quoteKey(quote))) intendedQuoteByKey.set(quoteKey(quote), quote);
   }
+  logLiveMemory("after_intended_quote_map", { intendedQuotes: intendedQuoteByKey.size });
 
   const retainedRewardContracts = rewardContractsByMarket(state);
   for (const order of state.openOrders.filter((candidate) => candidate.runMode === "live" && candidate.status === "open")) {
@@ -1343,6 +1411,11 @@ export async function runLiveTick(
     }
   }
   state.openOrders = state.openOrders.filter((order) => order.status === "open");
+  logLiveMemory("after_order_refresh_cancellations", {
+    openOrders: state.openOrders.length,
+    cancelled: state.cancelledOrders.length,
+    actions: actions.length,
+  });
 
   let walletUsdcBalanceUsd: number | undefined;
   let walletAlgoBalance: number | undefined;
@@ -1362,6 +1435,10 @@ export async function runLiveTick(
     }
     actions.push({ kind: "skip", message: `Wallet balance sync failed; dry-run bid budget checks disabled: ${message}` });
   }
+  logLiveMemory("after_wallet_balances", {
+    walletUsdcBalanceUsd: walletUsdcBalanceUsd?.toFixed(6),
+    walletAlgoBalance: walletAlgoBalance?.toFixed(6),
+  });
 
   actions.push(
     ...(await runParityLane({
@@ -1373,8 +1450,14 @@ export async function runLiveTick(
       walletUsdcBalanceUsd,
     })),
   );
+  logLiveMemory("after_parity_lane", { actions: actions.length });
 
   const laneQueues = buildLaneQueues(quotes, state, config);
+  logLiveMemory("after_lane_queues", {
+    rewardQueue: laneQueues.reward.length,
+    spreadQueue: laneQueues.spread.length,
+    exitQueue: laneQueues.exits.length,
+  });
   const openRewardOrders = state.openOrders.filter(
     (order) => order.runMode === "live" && order.status === "open" && order.source === "reward",
   ).length;
@@ -1565,7 +1648,12 @@ export async function runLiveTick(
       actions.push({ kind: "skip", message: `Place failed ${quoteToPlace.title} ${quoteToPlace.outcome}: ${message}` });
     }
   }
+  logLiveMemory("after_placements", {
+    openOrders: state.openOrders.length,
+    actions: actions.length,
+  });
   state.strategyStats.lastRunMode = mode;
   if (mode === "live") await saveAlphaState(config.stateKey, state);
+  logLiveMemory("after_final_state_save", { openOrders: state.openOrders.length });
   return finalLiveTickResult(liveClient, config, actions, state, { walletUsdcBalanceUsd, walletAlgoBalance });
 }
