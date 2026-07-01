@@ -405,11 +405,13 @@ function shouldTrackSpreadStats(config: AlphaConfig): boolean {
   return config.enableSpreadLane && config.enableSpreadCapture;
 }
 
-function pruneSpreadStatsWhenDisabled(state: AlphaBotState, config: AlphaConfig): number {
-  if (shouldTrackSpreadStats(config)) return 0;
+function pruneSpreadStatsToActiveMarkets(state: AlphaBotState, activeMarketAppIds: Set<number>): number {
   const previous = Object.keys(state.spreadStatsByMarket).length;
-  if (previous > 0) state.spreadStatsByMarket = {};
-  return previous;
+  if (previous === 0) return 0;
+  state.spreadStatsByMarket = Object.fromEntries(
+    Object.entries(state.spreadStatsByMarket).filter(([marketAppId]) => activeMarketAppIds.has(Number(marketAppId))),
+  );
+  return previous - Object.keys(state.spreadStatsByMarket).length;
 }
 
 function findMarketForPosition(
@@ -1158,19 +1160,20 @@ export async function runLiveTick(
     fills: state.fills.length,
     cancelled: state.cancelledOrders.length,
   });
-  const prunedSpreadStats = pruneSpreadStatsWhenDisabled(state, config);
-  if (prunedSpreadStats > 0) {
-    actions.push({
-      kind: "skip",
-      message: `Spread guardrails disabled; pruned ${prunedSpreadStats} spread market stat row(s) from persisted state`,
-    });
-  }
   const liveClient = new AlphaSdkClient(config, mode === "live");
   const marketByAppId = new Map<number, AlphaMarket>();
   for (const market of [...scan.markets, ...scan.rewardMarkets]) {
     marketByAppId.set(market.marketAppId, market);
   }
   logLiveMemory("after_market_map", { marketMap: marketByAppId.size });
+  const prunedSpreadStats = pruneSpreadStatsToActiveMarkets(state, new Set(marketByAppId.keys()));
+  if (prunedSpreadStats > 0) {
+    actions.push({
+      kind: "skip",
+      message: `Spread guardrails: pruned ${prunedSpreadStats} stale market stat row(s); retained ${Object.keys(state.spreadStatsByMarket).length} active row(s)`,
+    });
+  }
+  logLiveMemory("after_spread_stats_prune", { spreadStats: Object.keys(state.spreadStatsByMarket).length, prunedSpreadStats });
 
   const beforePositions = snapshotPositions(state);
   logLiveMemory("after_position_snapshot", { snapshotPositions: Object.keys(beforePositions).length });
