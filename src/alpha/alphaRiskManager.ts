@@ -94,22 +94,35 @@ export function checkQuoteRisk(
   config: AlphaConfig,
   mode: AlphaMode,
 ): AlphaRiskDecision {
+  const isInventoryExit = quote.source === "inventory_exit" && quote.side === "ask";
   const lane = laneFromQuote(quote);
-  const laneMaxOrderSizeUsd = lane === "reward" ? config.rewardMaxOrderSizeUsd : config.spreadMaxOrderSizeUsd;
+  const laneMaxOrderSizeUsd = isInventoryExit
+    ? config.inventoryExitMaxNotionalUsd
+    : lane === "reward"
+      ? config.rewardMaxOrderSizeUsd
+      : config.spreadMaxOrderSizeUsd;
   const laneMaxMarketExposureUsd = lane === "reward" ? config.rewardMaxMarketExposureUsd : config.spreadMaxMarketExposureUsd;
   const laneMaxTotalExposureUsd = lane === "reward" ? config.rewardMaxTotalExposureUsd : config.spreadMaxTotalExposureUsd;
   const laneMaxLiveOpenOrders = lane === "reward" ? config.rewardMaxLiveOpenOrders : config.spreadMaxLiveOpenOrders;
   const laneMaxLiveOrdersPerMarket = lane === "reward" ? config.rewardMaxLiveOrdersPerMarket : config.spreadMaxLiveOrdersPerMarket;
   const liveLikeMode = mode === "live" || mode === "live-dry-run";
 
-  if (quote.notionalUsd > laneMaxOrderSizeUsd) {
-    return { allowed: false, reason: `${lane} order size exceeds lane cap`, riskLevel: "high" };
+  if (quote.notionalUsd > laneMaxOrderSizeUsd + 1e-9) {
+    return {
+      allowed: false,
+      reason: isInventoryExit ? "inventory exit size exceeds unwind notional cap" : `${lane} order size exceeds lane cap`,
+      riskLevel: "high",
+    };
   }
-  if (liveLikeMode && laneOpenOrderCount(state, lane, mode) >= laneMaxLiveOpenOrders) {
-    return { allowed: false, reason: `${lane} lane open order count exceeds cap`, riskLevel: "high" };
-  }
-  if (liveLikeMode && laneOpenOrderCountByMarket(state, lane, quote.marketId, mode) >= laneMaxLiveOrdersPerMarket) {
-    return { allowed: false, reason: `${lane} lane market open order count exceeds cap`, riskLevel: "medium" };
+  // Inventory exits clear existing risk; do not let spread-entry open-order /
+  // exposure caps block them from posting.
+  if (!isInventoryExit) {
+    if (liveLikeMode && laneOpenOrderCount(state, lane, mode) >= laneMaxLiveOpenOrders) {
+      return { allowed: false, reason: `${lane} lane open order count exceeds cap`, riskLevel: "high" };
+    }
+    if (liveLikeMode && laneOpenOrderCountByMarket(state, lane, quote.marketId, mode) >= laneMaxLiveOrdersPerMarket) {
+      return { allowed: false, reason: `${lane} lane market open order count exceeds cap`, riskLevel: "medium" };
+    }
   }
   if (quote.price <= 0 || quote.price >= 1) {
     return { allowed: false, reason: "quote price outside valid range", riskLevel: "high" };
@@ -118,10 +131,10 @@ export function checkQuoteRisk(
     return { allowed: false, reason: "reward quote would sit outside reward zone", riskLevel: "medium" };
   }
   const addedExposure = quote.side === "bid" ? quote.notionalUsd : 0;
-  if (laneOrderExposureByMarket(state, lane, quote.marketId, mode) + addedExposure > laneMaxMarketExposureUsd) {
+  if (!isInventoryExit && laneOrderExposureByMarket(state, lane, quote.marketId, mode) + addedExposure > laneMaxMarketExposureUsd) {
     return { allowed: false, reason: `${lane} market exposure would exceed lane cap`, riskLevel: "high" };
   }
-  if (laneOrderExposure(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
+  if (!isInventoryExit && laneOrderExposure(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
     return { allowed: false, reason: `${lane} total exposure would exceed lane cap`, riskLevel: "high" };
   }
   if (mode === "paper" && quote.side === "bid" && quote.notionalUsd > state.cash) {
@@ -130,7 +143,7 @@ export function checkQuoteRisk(
   if (quote.side === "ask") {
     const position = state.positionsByMarket[quote.marketId];
     const held = quote.outcome === "YES" ? position?.yesShares ?? 0 : position?.noShares ?? 0;
-    if (quote.sizeShares + openAskShares(state, quote.marketId, quote.outcome, mode) > held) {
+    if (quote.sizeShares + openAskShares(state, quote.marketId, quote.outcome, mode) > held + 1e-9) {
       return { allowed: false, reason: "ask would sell more shares than current inventory", riskLevel: "high" };
     }
   }

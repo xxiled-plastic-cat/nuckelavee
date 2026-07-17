@@ -510,16 +510,19 @@ function controlledUnderwaterExitStatus(
     return { allowed: false, reason: `loss ${lossCents.toFixed(2)}c exceeds cap ${config.underwaterExitMaxLossCents.toFixed(2)}c` };
   }
   const notional = ask * shares;
-  if (notional > config.underwaterExitMaxNotionalUsd) {
-    return { allowed: false, reason: `notional $${notional.toFixed(2)} exceeds cap $${config.underwaterExitMaxNotionalUsd.toFixed(2)}` };
+  const notionalCap = Math.max(config.underwaterExitMaxNotionalUsd, config.inventoryExitMaxNotionalUsd);
+  if (notional > notionalCap + 1e-9) {
+    return { allowed: false, reason: `notional $${notional.toFixed(2)} exceeds unwind cap $${notionalCap.toFixed(2)}` };
   }
-  const marketLossUsed = controlledUnderwaterMarketLossUsd(state, marketId, ignoreEscrowAppId);
-  const projectedLoss = expectedLossUsd(averageCost, ask, shares);
-  if (marketLossUsed + projectedLoss > config.underwaterExitMaxMarketLossUsd) {
-    return {
-      allowed: false,
-      reason: `market loss cap $${config.underwaterExitMaxMarketLossUsd.toFixed(2)} would be exceeded`,
-    };
+  if (!config.inventoryExitFullPosition) {
+    const marketLossUsed = controlledUnderwaterMarketLossUsd(state, marketId, ignoreEscrowAppId);
+    const projectedLoss = expectedLossUsd(averageCost, ask, shares);
+    if (marketLossUsed + projectedLoss > config.underwaterExitMaxMarketLossUsd) {
+      return {
+        allowed: false,
+        reason: `market loss cap $${config.underwaterExitMaxMarketLossUsd.toFixed(2)} would be exceeded`,
+      };
+    }
   }
   return { allowed: true, reason: `controlled underwater exit eligible; loss ${lossCents.toFixed(2)}c` };
 }
@@ -1393,23 +1396,40 @@ export async function runLiveTick(
       });
     }
     if (exitOrderWouldLoseMoney(order, state, config)) {
-      if (controlledUnderwaterExitAllowed(order, state, config)) {
+      const intendedSizeMismatch = intended !== undefined && !isEquivalentQuote(order, intended, config);
+      if (controlledUnderwaterExitAllowed(order, state, config) && !intendedSizeMismatch) {
         actions.push({
           kind: "skip",
           message: `Kept controlled underwater exit escrowAppId=${escrowAppId}; within configured loss limits`,
         });
         continue;
       }
-      actions.push({
-        kind: "skip",
-        message: `Inventory exit escrowAppId=${escrowAppId} is below tracked cost plus ${config.spreadExitEdgeCents.toFixed(2)}c; allowing cancellation`,
-      });
+      if (intendedSizeMismatch) {
+        actions.push({
+          kind: "skip",
+          message: `Inventory exit escrowAppId=${escrowAppId} is undersized vs unwind target ${intended.sizeShares.toFixed(
+            6,
+          )} share(s) / $${intended.notionalUsd.toFixed(2)}; allowing replacement`,
+        });
+      } else {
+        actions.push({
+          kind: "skip",
+          message: `Inventory exit escrowAppId=${escrowAppId} is below tracked cost plus ${config.spreadExitEdgeCents.toFixed(2)}c; allowing cancellation`,
+        });
+      }
     } else if (order.source === "inventory_exit" && order.side === "ask" && orderAgeSeconds(order) < config.spreadExitMinDwellSeconds) {
-      actions.push({
-        kind: "skip",
-        message: `Kept inventory exit escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}s/${config.spreadExitMinDwellSeconds}s before reconsidering`,
-      });
-      continue;
+      if (intended !== undefined && !isEquivalentQuote(order, intended, config)) {
+        actions.push({
+          kind: "skip",
+          message: `Inventory exit escrowAppId=${escrowAppId} undersized vs unwind target; allowing refresh before dwell`,
+        });
+      } else {
+        actions.push({
+          kind: "skip",
+          message: `Kept inventory exit escrowAppId=${escrowAppId}; resting ${Math.floor(orderAgeSeconds(order))}s/${config.spreadExitMinDwellSeconds}s before reconsidering`,
+        });
+        continue;
+      }
     }
     if (order.source === "spread" && order.side === "bid" && orderAgeSeconds(order) < config.spreadEntryMinDwellSeconds) {
       if (config.enableSpreadLane && config.enableSpreadCapture) {
@@ -1500,11 +1520,11 @@ export async function runLiveTick(
   const openRewardOrders = state.openOrders.filter(
     (order) => order.runMode === "live" && order.status === "open" && order.source === "reward",
   ).length;
-  const openSpreadOrders = state.openOrders.filter(
-    (order) => order.runMode === "live" && order.status === "open" && order.source !== "reward",
+  const openSpreadEntryOrders = state.openOrders.filter(
+    (order) => order.runMode === "live" && order.status === "open" && order.source === "spread",
   ).length;
   const rewardQueueCap = Math.max(0, config.rewardMaxLiveOpenOrders - openRewardOrders);
-  const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadOrders);
+  const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadEntryOrders);
   const heldInventoryNotionalUsd = Object.values(state.positionsByMarket).reduce(
     (sum, position) => sum + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost,
     0,
@@ -1519,11 +1539,11 @@ export async function runLiveTick(
       )} >= ceiling $${config.maxInventoryNotionalUsd.toFixed(2)}; pausing new reward/spread bid entries (exits, merges, and claims still run)`,
     });
   }
-  const pendingExitSlots = Math.min(config.spreadExitSlotReserve, laneQueues.exits.length, spreadQueueCap);
+  const pendingExitSlots = Math.min(config.spreadExitSlotReserve, laneQueues.exits.length);
   if (pendingExitSlots > 0) {
-    actions.push({ kind: "skip", message: `Reserved ${pendingExitSlots} spread lane slot(s) for inventory exits` });
+    actions.push({ kind: "skip", message: `Prioritising ${pendingExitSlots} inventory exit(s) ahead of new entries` });
   }
-  if (rewardQueueCap === 0 && spreadQueueCap === 0) {
+  if (rewardQueueCap === 0 && spreadQueueCap === 0 && laneQueues.exits.length === 0) {
     actions.push({ kind: "skip", message: "No reward or spread lane order slots available" });
     if (mode === "live") await saveAlphaState(config.stateKey, state);
     return finalLiveTickResult(liveClient, config, actions, state, { walletUsdcBalanceUsd, walletAlgoBalance });
@@ -1538,13 +1558,15 @@ export async function runLiveTick(
     if (added.has(key)) return false;
     if (quote.source === "reward") {
       if (rewardQueued >= rewardQueueCap) return false;
-    } else if (spreadQueued >= spreadQueueCap) {
-      return false;
+      rewardQueued += 1;
+    } else if (quote.source === "inventory_exit") {
+      // Inventory exits clear existing risk and do not consume spread-entry slots.
+    } else {
+      if (spreadQueued >= spreadQueueCap) return false;
+      spreadQueued += 1;
     }
     placementQueue.push(quote);
     added.add(key);
-    if (quote.source === "reward") rewardQueued += 1;
-    else spreadQueued += 1;
     return true;
   };
 

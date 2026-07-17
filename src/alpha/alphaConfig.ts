@@ -67,6 +67,13 @@ export type AlphaConfig = {
   underwaterExitMaxMarketLossUsd: number;
   staleInventoryAgeHours: number;
   staleInventoryMaxLossCents: number;
+  /**
+   * Dedicated inventory-exit sizing, independent of spread-entry order caps.
+   * When full-position mode is on, each exit ask targets the remaining shares
+   * up to this notional ceiling so stranded inventory can actually clear.
+   */
+  inventoryExitMaxNotionalUsd: number;
+  inventoryExitFullPosition: boolean;
   enableInventoryMerge: boolean;
   inventoryMergeMinShares: number;
   enableResolvedClaim: boolean;
@@ -200,6 +207,8 @@ export function readAlphaConfig(): AlphaConfig {
     underwaterExitMaxMarketLossUsd: readNumber("ALPHA_UNDERWATER_EXIT_MAX_MARKET_LOSS_USD", 1),
     staleInventoryAgeHours: readNumber("ALPHA_STALE_INVENTORY_AGE_HOURS", 72),
     staleInventoryMaxLossCents: readNumber("ALPHA_STALE_INVENTORY_MAX_LOSS_CENTS", 25),
+    inventoryExitMaxNotionalUsd: readNumber("ALPHA_INVENTORY_EXIT_MAX_NOTIONAL_USD", 50),
+    inventoryExitFullPosition: readBool("ALPHA_INVENTORY_EXIT_FULL_POSITION", true),
     enableInventoryMerge: readBool("ALPHA_ENABLE_INVENTORY_MERGE", true),
     inventoryMergeMinShares: readNumber("ALPHA_INVENTORY_MERGE_MIN_SHARES", 1),
     enableResolvedClaim: readBool("ALPHA_ENABLE_RESOLVED_CLAIM", true),

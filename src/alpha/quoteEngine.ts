@@ -272,20 +272,27 @@ export function generateQuotes(
       }
     }
     if (ask !== undefined && ask > 0 && ask < 1) {
-      let exitNotionalUsd = laneNotionalUsd(
-        config.spreadTargetOrderSizeUsd,
-        config.spreadMinOrderSizeUsd,
-        config.spreadMaxOrderSizeUsd,
-        false,
-      );
+      // Inventory exits use a dedicated notional ceiling (and optional full-position
+      // sizing). They must not inherit spread-entry order sizes — those are for new
+      // risk, while exits are clearing existing risk.
+      const inventoryNotionalCap = Math.max(0, config.inventoryExitMaxNotionalUsd);
+      let exitNotionalUsd: number | undefined =
+        inventoryNotionalCap > 0
+          ? config.inventoryExitFullPosition
+            ? Math.min(ask * roundShares(inventory), inventoryNotionalCap)
+            : Math.min(config.spreadTargetOrderSizeUsd, inventoryNotionalCap)
+          : undefined;
       if (controlledUnderwaterExit) {
-        exitNotionalUsd = Math.min(exitNotionalUsd ?? config.underwaterExitMaxNotionalUsd, config.underwaterExitMaxNotionalUsd);
+        // Underwater exits still honour the dedicated unwind ceiling, but never
+        // fall back to the tiny legacy underwater notional drip.
+        const underwaterCap = Math.max(config.underwaterExitMaxNotionalUsd, inventoryNotionalCap);
+        exitNotionalUsd = Math.min(exitNotionalUsd ?? underwaterCap, underwaterCap);
       }
-      const sized = exitNotionalUsd === undefined ? undefined : quoteSize(ask, exitNotionalUsd);
+      const sized = exitNotionalUsd === undefined || exitNotionalUsd <= 0 ? undefined : quoteSize(ask, exitNotionalUsd);
       if (sized) {
         const sizeShares = Math.min(sized.sizeShares, roundShares(inventory));
         if (sizeShares > 0) {
-          if (controlledUnderwaterExit && averageCost !== undefined) {
+          if (controlledUnderwaterExit && averageCost !== undefined && !config.inventoryExitFullPosition) {
             const marketLossUsed = existingControlledMarketLossUsd(state, market.id);
             const quoteLoss = expectedLossUsd(averageCost, ask, sizeShares);
             if (marketLossUsed + quoteLoss > config.underwaterExitMaxMarketLossUsd) continue;
