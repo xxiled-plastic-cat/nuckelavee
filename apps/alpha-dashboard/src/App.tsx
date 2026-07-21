@@ -93,15 +93,20 @@ export default function App() {
     const cards: MetricCard[] = [];
     if (snapshot.realPnl) {
       cards.push(
-        { label: "Real PnL", value: fmtUsd(snapshot.realPnl.realPnlUsd) },
-        { label: "Net Worth", value: fmtUsdAmount(snapshot.realPnl.netWorthUsd) },
-        { label: "Contributed Capital", value: fmtUsdAmount(snapshot.realPnl.contributedCapitalUsd) },
+        { label: "Trading PnL", value: fmtUsd(snapshot.realPnl.tradingPnlUsd) },
         { label: "Rewards Received", value: fmtRewardUsd(snapshot.realPnl.rewardsReceivedUsd) },
+        { label: "Cash (wallet+escrow)", value: fmtUsdAmount(snapshot.realPnl.cashUsdc) },
+        { label: "Total Economic", value: fmtUsd(snapshot.realPnl.totalEconomicUsd) },
+      );
+    } else {
+      cards.push(
+        { label: "Trading PnL", value: fmtUsd(snapshot.overview.tradingPnl) },
+        { label: "Estimated Rewards", value: fmtUsd(snapshot.overview.estimatedRewardsUsd) },
+        { label: "Wallet USDC", value: fmtUsd(snapshot.walletBalances.usdc) },
       );
     }
     cards.push(
-      { label: "Trading PnL", value: fmtUsd(snapshot.overview.tradingPnl) },
-      { label: "Estimated Rewards", value: fmtUsd(snapshot.overview.estimatedRewardsUsd) },
+      { label: "Net Worth", value: fmtUsdAmount(snapshot.realPnl?.netWorthUsd) },
       { label: "Position Cost", value: fmtUsdAmount(positionLockedUsd) },
       { label: "Bid Exposure", value: fmtUsd(snapshot.overview.bidExposureUsd) },
       { label: "Open Orders", value: String(snapshot.overview.openOrders) },
@@ -112,7 +117,6 @@ export default function App() {
         )}/day)`,
       },
       { label: "Reward Liquidity Share", value: fmtPercent(snapshot.overview.activeRewardLiquidityShare) },
-      { label: "Wallet USDC", value: fmtUsd(snapshot.walletBalances.usdc) },
     );
     return cards;
   }, [snapshot]);
@@ -150,7 +154,7 @@ export default function App() {
               {metrics.map((card) => (
                 <article
                   key={card.label}
-                  className={`metric-card card${card.label === "Real PnL" ? " metric-card-primary" : ""}`}
+                  className={`metric-card card${card.label === "Total Economic" ? " metric-card-primary" : ""}`}
                 >
                   <h3>{card.label}</h3>
                   <p>{card.value}</p>
@@ -160,22 +164,33 @@ export default function App() {
 
             {snapshot.realPnl && (
               <section className="card">
-                <h2>Real PnL Reconciliation</h2>
+                <h2>Accountancy (split ledgers)</h2>
                 <ul className="reconciliation-list">
-                  <li>Wallet USDC: {fmtUsdAmount(snapshot.realPnl.walletUsdc)}</li>
-                  <li>Bid escrow USDC: {fmtUsdAmount(snapshot.realPnl.bidEscrowUsd)}</li>
+                  <li>
+                    Trading: realised {fmtUsd(snapshot.realPnl.realisedPnlUsd)} | unrealised{" "}
+                    {fmtUsd(snapshot.realPnl.unrealisedPnlUsd)} | total {fmtUsd(snapshot.realPnl.tradingPnlUsd)}
+                  </li>
+                  <li>
+                    Rewards received (on-chain): {fmtRewardUsd(snapshot.realPnl.rewardsReceivedUsd)} | est accrual{" "}
+                    {fmtRewardUsd(snapshot.realPnl.estimatedRewardsUsd)}
+                  </li>
+                  <li>
+                    Cash: wallet {fmtUsdAmount(snapshot.realPnl.walletUsdc)} | bid escrow{" "}
+                    {fmtUsdAmount(snapshot.realPnl.bidEscrowUsd)} | total {fmtUsdAmount(snapshot.realPnl.cashUsdc)}
+                  </li>
+                  <li>Total economic (trading + rewards): {fmtUsd(snapshot.realPnl.totalEconomicUsd)}</li>
                   <li>Positions value: {fmtUsdAmount(snapshot.realPnl.positionsValueUsd)}</li>
+                  <li>Net worth (cash + positions): {fmtUsdAmount(snapshot.realPnl.netWorthUsd)}</li>
                   <li>Market USDC in (lifetime): {fmtUsdAmount(snapshot.realPnl.marketUsdcInUsd)}</li>
                   <li>Market USDC out (lifetime): {fmtUsdAmount(snapshot.realPnl.marketUsdcOutUsd)}</li>
-                  <li>Trading PnL: {fmtUsd(snapshot.realPnl.tradingPnlUsd)}</li>
                   {snapshot.realPnl.ledgerCachedAt && (
                     <li>Flow data as of: {fmtTime(snapshot.realPnl.ledgerCachedAt)}</li>
                   )}
                 </ul>
                 {Math.abs(snapshot.realPnl.externalCapitalDriftUsd) > 0.05 && (
                   <p className="warning-inline">
-                    External capital drift: {fmtUsd(snapshot.realPnl.externalCapitalDriftUsd)} (expected ~$0 with fixed
-                    funding)
+                    External capital drift vs historical seed: {fmtUsd(snapshot.realPnl.externalCapitalDriftUsd)} (diagnostic
+                    only — not trading PnL)
                   </p>
                 )}
               </section>

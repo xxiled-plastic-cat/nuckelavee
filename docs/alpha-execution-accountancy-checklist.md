@@ -87,13 +87,15 @@ Goal: merge / claim / parity cannot invent PnL or leave orphan legs from races.
 
 Goal: digests and dashboard show three independent truths, not one blended number.
 
-- [ ] **Trading PnL** — realised from fill ledger + unrealised from marks (`pnlTracker`)
-- [ ] **Rewards** — on-chain LP receipts only (`capitalLedger` / reward sender scan)
-- [ ] **Cash / USDC** — wallet free + bid escrow (drop hardcoded initial capital assumptions from trading truth)
-- [ ] Digest / dashboard: three lines (trading / rewards / cash), plus optional “total economic” as sum with explicit label
-- [ ] Ensure reward refresh never mutates trading positions or fill history
+- [x] **Trading PnL** — realised from fill ledger + unrealised from marks (`pnlTracker`)
+- [x] **Rewards** — on-chain LP receipts only (`capitalLedger` / reward sender scan)
+- [x] **Cash / USDC** — wallet free + bid escrow (drop hardcoded initial capital assumptions from trading truth)
+- [x] Digest / dashboard: three lines (trading / rewards / cash), plus optional “total economic” as sum with explicit label
+- [x] Ensure reward refresh never mutates trading positions or fill history
 
 **Done when:** a fill-only session moves trading PnL without changing rewards; a reward receipt moves rewards without changing trading realised; cash reconciles to wallet within epsilon.
+
+_Completed: Phase 5 split ledgers (`accountancyLedgers.ts`), digests/dashboard/capital report wired to trading/rewards/cash + total economic._
 
 ---
 

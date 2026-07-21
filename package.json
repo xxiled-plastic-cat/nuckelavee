@@ -46,7 +46,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/alpha/capitalLedger.test.ts src/alpha/liveFillLedger.test.ts src/alpha/inventoryView.test.ts src/alpha/alphaRiskManager.test.ts src/alpha/settlement.test.ts"
+    "test": "tsx --test src/alpha/capitalLedger.test.ts src/alpha/liveFillLedger.test.ts src/alpha/inventoryView.test.ts src/alpha/alphaRiskManager.test.ts src/alpha/settlement.test.ts src/alpha/accountancyLedgers.test.ts"
   },
   "keywords": [],
   "author": "",

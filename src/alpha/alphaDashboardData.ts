@@ -100,17 +100,23 @@ export type AlphaDashboardSnapshot = {
 };
 
 export type DashboardRealPnl = {
+  /** @deprecated Seed/observed capital ref only — not trading truth. */
   contributedCapitalUsd: number;
   netWorthUsd?: number;
+  /** @deprecated Prefer totalEconomicUsd. */
   realPnlUsd?: number;
   walletUsdc?: number;
   bidEscrowUsd: number;
+  cashUsdc?: number;
   positionsValueUsd: number;
   rewardsReceivedUsd: number;
   marketUsdcInUsd: number;
   marketUsdcOutUsd: number;
   tradingPnlUsd: number;
+  realisedPnlUsd: number;
+  unrealisedPnlUsd: number;
   estimatedRewardsUsd: number;
+  totalEconomicUsd: number;
   externalCapitalDriftUsd: number;
   ledgerCachedAt?: string;
 };
@@ -120,14 +126,18 @@ function toDashboardRealPnl(ledger: CapitalLedger): DashboardRealPnl {
     contributedCapitalUsd: ledger.contributedCapitalUsd,
     netWorthUsd: ledger.netWorthUsd,
     realPnlUsd: ledger.realPnlUsd,
-    walletUsdc: ledger.components.walletUsdc,
-    bidEscrowUsd: ledger.components.bidEscrowUsd,
-    positionsValueUsd: ledger.components.positionsValueUsd,
-    rewardsReceivedUsd: ledger.flows.rewardsReceivedUsd,
+    walletUsdc: ledger.accountancy.cash.walletUsdc,
+    bidEscrowUsd: ledger.accountancy.cash.bidEscrowUsd,
+    cashUsdc: ledger.accountancy.cash.cashUsdc,
+    positionsValueUsd: ledger.accountancy.positionsValueUsd,
+    rewardsReceivedUsd: ledger.accountancy.rewards.receivedUsd,
     marketUsdcInUsd: ledger.flows.marketUsdcInUsd,
     marketUsdcOutUsd: ledger.flows.marketUsdcOutUsd,
-    tradingPnlUsd: ledger.reconciliation.tradingPnlUsd,
-    estimatedRewardsUsd: ledger.reconciliation.estimatedRewardsUsd,
+    tradingPnlUsd: ledger.accountancy.trading.tradingPnlUsd,
+    realisedPnlUsd: ledger.accountancy.trading.realisedPnlUsd,
+    unrealisedPnlUsd: ledger.accountancy.trading.unrealisedPnlUsd,
+    estimatedRewardsUsd: ledger.accountancy.rewards.estimatedAccrualUsd,
+    totalEconomicUsd: ledger.accountancy.totalEconomicUsd,
     externalCapitalDriftUsd: ledger.reconciliation.externalCapitalDriftUsd,
     ledgerCachedAt: ledger.scanMeta.cachedAt,
   };
@@ -445,7 +455,7 @@ export async function buildAlphaDashboardSnapshot(walletAddressOverride?: string
       await saveAlphaState(config.stateKey, mergeCapitalLedgerIntoState(state, ledger.flows, ledger.scanMeta));
     }
   } catch (error) {
-    errors.push(`Real PnL ledger unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    errors.push(`Accountancy ledger unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   const snapshot: AlphaDashboardSnapshot = {

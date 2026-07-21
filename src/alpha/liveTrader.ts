@@ -617,8 +617,10 @@ const ACTUAL_REWARD_REFRESH_MS = 3_600_000;
 
 /**
  * Throttled refresh of the actual on-chain LP rewards received (the real number
- * shown in the digest), persisted into state. Defensive: a scan failure never
- * affects trading. Only runs in live mode (dry-run keeps the last value).
+ * shown in the digest), persisted into `state.capitalLedger` only. Never mutates
+ * trading positions, fill history, or realised/unrealised PnL. Defensive: a
+ * scan failure never affects trading. Only runs in live mode (dry-run keeps
+ * the last value).
  */
 async function refreshActualRewardsReceived(input: {
   config: AlphaConfig;

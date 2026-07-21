@@ -91,17 +91,23 @@ export type DashboardSnapshot = {
 };
 
 export type DashboardRealPnl = {
+  /** Seed/observed capital ref only — not trading truth. */
   contributedCapitalUsd: number;
   netWorthUsd?: number;
+  /** @deprecated Prefer totalEconomicUsd. */
   realPnlUsd?: number;
   walletUsdc?: number;
   bidEscrowUsd: number;
+  cashUsdc?: number;
   positionsValueUsd: number;
   rewardsReceivedUsd: number;
   marketUsdcInUsd: number;
   marketUsdcOutUsd: number;
   tradingPnlUsd: number;
+  realisedPnlUsd: number;
+  unrealisedPnlUsd: number;
   estimatedRewardsUsd: number;
+  totalEconomicUsd: number;
   externalCapitalDriftUsd: number;
   ledgerCachedAt?: string;
 };

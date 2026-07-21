@@ -23,6 +23,7 @@ import type { LiveAction } from "./liveTrader.js";
 import { runLiveTick } from "./liveTrader.js";
 import { notifyTelegram, notifyTelegramThrottled, readSkipNoticeThrottleMinutes } from "./telegramNotifier.js";
 import { runResolvedAssetCleanup } from "./alphaResolvedAssetCleanup.js";
+import { buildAccountancySnapshot, formatAccountancyDigestLines } from "./accountancyLedgers.js";
 import { buildCapitalLedger, mergeCapitalLedgerIntoState, printCapitalLedgerReport, ALPHA_REWARD_HISTORY_SENDER } from "./capitalLedger.js";
 import { formatMicroUsdc, scanWalletUsdcTransfers } from "./indexerTransfers.js";
 import { closeDatabase } from "../db.js";
@@ -472,6 +473,21 @@ function buildTickDigestMessage(result: {
 }): string {
   const actionSummary = summarizeTickActions(result.actions);
   const exposure = summarizeLiveExposure(result.state, result.config, rewardContextFromScan(result.scan, result.config.walletAddress));
+  const positionsValueUsd = Object.values(result.state.positionsByMarket).reduce((sum, position) => {
+    const yesMark = position.lastMark ?? position.avgYesCost;
+    const noMark = position.lastMark ?? position.avgNoCost;
+    return sum + position.yesShares * yesMark + position.noShares * noMark;
+  }, 0);
+  const accountancyLines = formatAccountancyDigestLines(
+    buildAccountancySnapshot({
+      state: result.state,
+      walletUsdc: result.walletUsdcBalanceUsd,
+      bidEscrowUsd: exposure.bidExposureUsd,
+      positionsValueUsd,
+    }),
+    formatUsd,
+    formatRewardUsd,
+  );
   const tickAt = new Date().toISOString();
 
   return [
@@ -488,16 +504,13 @@ function buildTickDigestMessage(result: {
       exposure.rewardEligibleExitNotionalUsd,
     )})`,
     `underwater_inventory=${formatUsd(exposure.underwaterInventoryNotionalUsd)} (loss ${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)})`,
-    `pnl: realised=${formatUsd(result.state.realisedPnl)} unrealised=${formatUsd(result.state.unrealisedPnl)} trading=${formatUsd(
-      result.state.totalPnl,
-    )} exit_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
-    `rewards: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
+    ...accountancyLines,
+    `exit_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)}`,
+    `reward_rates: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
       exposure.activeRewardRateDailyUsd,
     )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
       exposure.activeRewardLiquidityShare,
-    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} est=${formatRewardUsd(result.state.estimatedRewardsUsd)} received=${formatRewardUsd(
-      exposure.actualRewardsReceivedUsd,
-    )}`,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)}`,
     `spread_pnl=${formatUsd(result.state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(result.state.strategyStats.parityGrossPnl)}`,
     `placed_orders=${compactLines(actionSummary.placed)}`,
     `closed_or_cancelled=${compactLines([...actionSummary.cancelled, ...actionSummary.inferredExitFills])}`,
@@ -553,6 +566,21 @@ function buildDailySummaryMessage(
   scan?: AlphaScanResult,
 ): string {
   const exposure = summarizeLiveExposure(state, config, scan && config ? rewardContextFromScan(scan, config.walletAddress) : {});
+  const positionsValueUsd = Object.values(state.positionsByMarket).reduce((sum, position) => {
+    const yesMark = position.lastMark ?? position.avgYesCost;
+    const noMark = position.lastMark ?? position.avgNoCost;
+    return sum + position.yesShares * yesMark + position.noShares * noMark;
+  }, 0);
+  const accountancyLines = formatAccountancyDigestLines(
+    buildAccountancySnapshot({
+      state,
+      walletUsdc: walletUsdcBalanceUsd,
+      bidEscrowUsd: exposure.bidExposureUsd,
+      positionsValueUsd,
+    }),
+    formatUsd,
+    formatRewardUsd,
+  );
   const date = new Date().toISOString().slice(0, 10);
   return [
     `Daily summary ${date}`,
@@ -567,16 +595,13 @@ function buildDailySummaryMessage(
       exposure.rewardEligibleExitNotionalUsd,
     )})`,
     `underwater_inventory=${formatUsd(exposure.underwaterInventoryNotionalUsd)} (loss ${formatUsd(exposure.underwaterInventoryUnrealisedLossUsd)})`,
-    `pnl: realised=${formatUsd(state.realisedPnl)} trading=${formatUsd(state.totalPnl)} exit_if_filled=${formatUsd(
-      exposure.exitPnlIfFilledUsd,
-    )} realised_plus_open_exit=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
-    `rewards: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
+    ...accountancyLines,
+    `exit_if_filled=${formatUsd(exposure.exitPnlIfFilledUsd)} realised_plus_open_exit=${formatUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
+    `reward_rates: eligible_liquidity=${formatUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) active=${formatRewardUsd(
       exposure.activeRewardRateDailyUsd,
     )}/day potential=${formatRewardUsd(exposure.potentialRewardRateDailyUsd)}/day share=${formatPercent(
       exposure.activeRewardLiquidityShare,
-    )}/${formatPercent(exposure.potentialRewardLiquidityShare)} est=${formatRewardUsd(state.estimatedRewardsUsd)} received=${formatRewardUsd(
-      exposure.actualRewardsReceivedUsd,
-    )}`,
+    )}/${formatPercent(exposure.potentialRewardLiquidityShare)}`,
     `spread_pnl=${formatUsd(state.strategyStats.spreadRealisedPnl)} parity_pnl=${formatUsd(state.strategyStats.parityGrossPnl)}`,
     `lifetime: placed=${state.strategyStats.liveOrdersPlaced} cancelled=${state.strategyStats.liveOrdersCancelled}`,
   ].join("\n");

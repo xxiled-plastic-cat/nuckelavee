@@ -1,9 +1,15 @@
 import algosdk from "algosdk";
 
+import {
+  applyRewardFlowsToState,
+  buildAccountancySnapshot,
+  type AccountancySnapshot,
+} from "./accountancyLedgers.js";
 import type { AlphaConfig } from "./alphaConfig.js";
 import { microUsdcToUsd, scanWalletUsdcTransfers, type WalletUsdcTransfer } from "./indexerTransfers.js";
 import type { AlphaBotState } from "./alphaTypes.js";
 
+/** Optional seed reference for external-drift diagnostics only — not trading PnL. */
 export const ALPHA_INITIAL_CAPITAL_USD = 206;
 export const ALPHA_REWARD_HISTORY_SENDER = "LPCTQJDOFBG5J63LOUY6A6JMHHHXIVOIZ7FLN6FETFSSWQOJR56V65INTU";
 const CAPITAL_LEDGER_CACHE_MS = 3_600_000;
@@ -28,9 +34,12 @@ export type FlowTotals = {
 
 export type CapitalLedger = {
   asOf: string;
+  /** @deprecated Seed reference for drift only; prefer accountancy.cash / observed external flows. */
   contributedCapitalUsd: number;
   netWorthUsd?: number;
+  /** @deprecated Blended net-worth-minus-seed; prefer accountancy.totalEconomicUsd. */
   realPnlUsd?: number;
+  accountancy: AccountancySnapshot;
   components: {
     walletUsdc?: number;
     bidEscrowUsd: number;
@@ -39,6 +48,7 @@ export type CapitalLedger = {
   flows: FlowTotals;
   reconciliation: {
     tradingPnlUsd: number;
+    rewardsReceivedUsd: number;
     estimatedRewardsUsd: number;
     impliedNonTradingUsd?: number;
     externalCapitalDriftUsd: number;
@@ -194,24 +204,17 @@ export function capitalLedgerSnapshotFromState(state: AlphaBotState): AlphaBotSt
   return { ...cached };
 }
 
+/**
+ * Merge indexer flow totals into state. Mutates only `capitalLedger` —
+ * never trading positions, fill history, or realised/unrealised PnL.
+ */
 export function mergeCapitalLedgerIntoState(
   state: AlphaBotState,
   flows: FlowTotals,
   scanMeta: { pagesScanned: number; transfersScanned: number },
 ): AlphaBotState {
-  return {
-    ...state,
-    capitalLedger: {
-      lastScanAt: new Date().toISOString(),
-      rewardsReceivedUsd: flows.rewardsReceivedUsd,
-      marketUsdcInUsd: flows.marketUsdcInUsd,
-      marketUsdcOutUsd: flows.marketUsdcOutUsd,
-      externalInUsd: flows.externalInUsd,
-      externalOutUsd: flows.externalOutUsd,
-      pagesScanned: scanMeta.pagesScanned,
-      transfersScanned: scanMeta.transfersScanned,
-    },
-  };
+  applyRewardFlowsToState(state, flows, scanMeta);
+  return state;
 }
 
 export async function buildCapitalLedger(input: {
@@ -225,10 +228,8 @@ export async function buildCapitalLedger(input: {
   escrowAppIds: number[];
   forceRefresh?: boolean;
 }): Promise<CapitalLedger> {
-  const contributedCapitalUsd = ALPHA_INITIAL_CAPITAL_USD;
   const positionsValueUsd = totalPositionsValueUsd(input.positions);
   const netWorthUsd = computeNetWorth(input.walletUsdc, input.bidEscrowUsd, input.positions);
-  const realPnlUsd = netWorthUsd === undefined ? undefined : netWorthUsd - contributedCapitalUsd;
 
   let flows: FlowTotals = flowTotalsFromState(input.state) ?? {
     rewardsReceivedUsd: 0,
@@ -272,14 +273,42 @@ export async function buildCapitalLedger(input: {
     }
   }
 
-  const externalCapitalDriftUsd = flows.externalInUsd - flows.externalOutUsd - contributedCapitalUsd;
+  // Prefer observed external net inflows as contributed capital; fall back to
+  // the historical seed only for drift diagnostics — never as trading truth.
+  const observedExternalNet = flows.externalInUsd - flows.externalOutUsd;
+  const contributedCapitalUsd = observedExternalNet > 0 ? observedExternalNet : ALPHA_INITIAL_CAPITAL_USD;
+  const realPnlUsd = netWorthUsd === undefined ? undefined : netWorthUsd - contributedCapitalUsd;
+  const externalCapitalDriftUsd = observedExternalNet - ALPHA_INITIAL_CAPITAL_USD;
   const impliedNonTradingUsd = realPnlUsd === undefined ? undefined : realPnlUsd - input.state.totalPnl;
+
+  // Ensure accountancy rewards.received matches the flows we just resolved
+  // (state may lag until mergeCapitalLedgerIntoState runs).
+  const stateForAccountancy: AlphaBotState = {
+    ...input.state,
+    capitalLedger: {
+      lastScanAt: scanMeta.cachedAt ?? input.state.capitalLedger?.lastScanAt ?? new Date().toISOString(),
+      rewardsReceivedUsd: flows.rewardsReceivedUsd,
+      marketUsdcInUsd: flows.marketUsdcInUsd,
+      marketUsdcOutUsd: flows.marketUsdcOutUsd,
+      externalInUsd: flows.externalInUsd,
+      externalOutUsd: flows.externalOutUsd,
+      pagesScanned: scanMeta.pagesScanned,
+      transfersScanned: scanMeta.transfersScanned,
+    },
+  };
+  const accountancy = buildAccountancySnapshot({
+    state: stateForAccountancy,
+    walletUsdc: input.walletUsdc,
+    bidEscrowUsd: input.bidEscrowUsd,
+    positionsValueUsd,
+  });
 
   return {
     asOf: new Date().toISOString(),
     contributedCapitalUsd,
-    netWorthUsd,
+    netWorthUsd: accountancy.netWorthUsd ?? netWorthUsd,
     realPnlUsd,
+    accountancy,
     components: {
       walletUsdc: input.walletUsdc,
       bidEscrowUsd: input.bidEscrowUsd,
@@ -287,8 +316,9 @@ export async function buildCapitalLedger(input: {
     },
     flows,
     reconciliation: {
-      tradingPnlUsd: input.state.totalPnl,
-      estimatedRewardsUsd: input.state.estimatedRewardsUsd,
+      tradingPnlUsd: accountancy.trading.tradingPnlUsd,
+      rewardsReceivedUsd: accountancy.rewards.receivedUsd,
+      estimatedRewardsUsd: accountancy.rewards.estimatedAccrualUsd,
       impliedNonTradingUsd,
       externalCapitalDriftUsd,
     },
@@ -307,13 +337,26 @@ export function printCapitalLedgerReport(ledger: CapitalLedger, walletAddress?: 
   if (walletAddress) console.log(`Wallet: ${walletAddress}`);
   console.log(`As of: ${ledger.asOf}`);
   console.log("");
-  console.log("Net worth");
-  console.log(`  Contributed capital: $${ledger.contributedCapitalUsd.toFixed(2)}`);
-  console.log(`  Wallet USDC: ${ledger.components.walletUsdc === undefined ? "unknown" : `$${ledger.components.walletUsdc.toFixed(2)}`}`);
-  console.log(`  Bid escrow USDC: $${ledger.components.bidEscrowUsd.toFixed(2)}`);
+  console.log("Accountancy (independent ledgers)");
+  console.log(
+    `  Trading: realised ${fmtSignedUsd(ledger.accountancy.trading.realisedPnlUsd)} | unrealised ${fmtSignedUsd(
+      ledger.accountancy.trading.unrealisedPnlUsd,
+    )} | total ${fmtSignedUsd(ledger.accountancy.trading.tradingPnlUsd)}`,
+  );
+  console.log(
+    `  Rewards (on-chain receipts): $${ledger.accountancy.rewards.receivedUsd.toFixed(6)} | est accrual $${ledger.accountancy.rewards.estimatedAccrualUsd.toFixed(6)}`,
+  );
+  console.log(
+    `  Cash: wallet ${ledger.accountancy.cash.walletUsdc === undefined ? "unknown" : `$${ledger.accountancy.cash.walletUsdc.toFixed(2)}`} | bid escrow $${ledger.accountancy.cash.bidEscrowUsd.toFixed(
+      2,
+    )} | total ${ledger.accountancy.cash.cashUsdc === undefined ? "unknown" : `$${ledger.accountancy.cash.cashUsdc.toFixed(2)}`}`,
+  );
+  console.log(`  Total economic (trading + rewards): ${fmtSignedUsd(ledger.accountancy.totalEconomicUsd)}`);
+  console.log("");
+  console.log("Wealth snapshot");
   console.log(`  Positions value: $${ledger.components.positionsValueUsd.toFixed(2)}`);
-  console.log(`  Net worth: ${ledger.netWorthUsd === undefined ? "unknown" : `$${ledger.netWorthUsd.toFixed(2)}`}`);
-  console.log(`  Real PnL: ${ledger.realPnlUsd === undefined ? "unknown" : fmtSignedUsd(ledger.realPnlUsd)}`);
+  console.log(`  Net worth (cash + positions): ${ledger.netWorthUsd === undefined ? "unknown" : `$${ledger.netWorthUsd.toFixed(2)}`}`);
+  console.log(`  Observed/seed capital ref: $${ledger.contributedCapitalUsd.toFixed(2)} (not trading PnL)`);
   console.log("");
   console.log("Lifetime USDC flows (indexer)");
   console.log(`  Rewards received: $${ledger.flows.rewardsReceivedUsd.toFixed(6)}`);
@@ -322,13 +365,11 @@ export function printCapitalLedgerReport(ledger: CapitalLedger, walletAddress?: 
   console.log(`  External in: $${ledger.flows.externalInUsd.toFixed(2)}`);
   console.log(`  External out: $${ledger.flows.externalOutUsd.toFixed(2)}`);
   console.log("");
-  console.log("Reconciliation");
-  console.log(`  Trading PnL: ${fmtSignedUsd(ledger.reconciliation.tradingPnlUsd)}`);
-  console.log(`  Estimated rewards (accrual): $${ledger.reconciliation.estimatedRewardsUsd.toFixed(6)}`);
+  console.log("Diagnostics");
   console.log(
-    `  Implied non-trading: ${ledger.reconciliation.impliedNonTradingUsd === undefined ? "unknown" : fmtSignedUsd(ledger.reconciliation.impliedNonTradingUsd)}`,
+    `  Implied non-trading vs wealth-minus-capital: ${ledger.reconciliation.impliedNonTradingUsd === undefined ? "unknown" : fmtSignedUsd(ledger.reconciliation.impliedNonTradingUsd)}`,
   );
-  console.log(`  External capital drift: ${fmtSignedUsd(ledger.reconciliation.externalCapitalDriftUsd)}`);
+  console.log(`  External capital drift vs seed $${ALPHA_INITIAL_CAPITAL_USD}: ${fmtSignedUsd(ledger.reconciliation.externalCapitalDriftUsd)}`);
   console.log("");
   console.log("Scan");
   console.log(`  Pages scanned: ${ledger.scanMeta.pagesScanned}`);

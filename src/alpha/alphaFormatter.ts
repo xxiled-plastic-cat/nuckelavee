@@ -1,5 +1,6 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import type { AlphaBotState, AlphaMarket, AlphaOpportunity, AlphaOrderbook, AlphaParityPlan } from "./alphaTypes.js";
+import { buildAccountancySnapshot, formatAccountancyDigestLines } from "./accountancyLedgers.js";
 import { summarizeBooks, type AlphaScanResult } from "./alphaMarketScanner.js";
 import { estimateRewardRateForOrders, reliableDailyRewardUsd, type RewardRateContext } from "./rewardRateEstimator.js";
 
@@ -409,6 +410,21 @@ export function printLiveSummary(
   rewardContext: RewardRateContext = {},
 ): void {
   const exposure = summarizeLiveExposure(state, config, rewardContext);
+  const positionsValueUsd = Object.values(state.positionsByMarket).reduce((sum, position) => {
+    const yesMark = position.lastMark ?? position.avgYesCost;
+    const noMark = position.lastMark ?? position.avgNoCost;
+    return sum + position.yesShares * yesMark + position.noShares * noMark;
+  }, 0);
+  const accountancyLines = formatAccountancyDigestLines(
+    buildAccountancySnapshot({
+      state,
+      walletUsdc: walletUsdcBalanceUsd,
+      bidEscrowUsd: exposure.bidExposureUsd,
+      positionsValueUsd,
+    }),
+    fmtUsd,
+    fmtRewardUsd,
+  );
   const walletAlgo = walletAlgoBalance === undefined ? "unknown" : walletAlgoBalance.toFixed(6);
   console.log("");
   console.log(`[${new Date().toISOString().slice(11, 19)}] liveSummary`);
@@ -431,21 +447,18 @@ export function printLiveSummary(
       exposure.underwaterInventoryUnrealisedLossUsd,
     )}`,
   );
+  for (const line of accountancyLines) {
+    console.log(`  ${line}`);
+  }
   console.log(
-    `  pnl: realised ${fmtUsd(state.realisedPnl)} | unrealised ${fmtUsd(state.unrealisedPnl)} | trading ${fmtUsd(
-      state.totalPnl,
-    )} | exitIfFilled ${fmtUsd(exposure.exitPnlIfFilledUsd)} | realised+openExit ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
+    `  exitIfFilled ${fmtUsd(exposure.exitPnlIfFilledUsd)} | realised+openExit ${fmtUsd(exposure.realisedPlusOpenExitPnlUsd)}`,
   );
   console.log(
-    `  rewards: eligibleLiquidity ${fmtUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) | active ${fmtRewardUsd(
+    `  reward_rates: eligibleLiquidity ${fmtUsd(exposure.rewardEligibleLiquidityUsd)} (${exposure.rewardEligibleOrders} ord) | active ${fmtRewardUsd(
       exposure.activeRewardRateDailyUsd,
     )}/day (${exposure.activeRewardOrders} ord) | potential ${fmtRewardUsd(
       exposure.potentialRewardRateDailyUsd,
-    )}/day | share ${fmtPercent(exposure.activeRewardLiquidityShare)}/${fmtPercent(
-      exposure.potentialRewardLiquidityShare,
-    )} | est ${fmtRewardUsd(state.estimatedRewardsUsd)} | received ${fmtRewardUsd(exposure.actualRewardsReceivedUsd)}${
-      exposure.actualRewardsAsOf ? ` (as of ${exposure.actualRewardsAsOf.slice(0, 10)})` : ""
-    }`,
+    )}/day | share ${fmtPercent(exposure.activeRewardLiquidityShare)}/${fmtPercent(exposure.potentialRewardLiquidityShare)}`,
   );
   console.log(
     `  spread: pnl ${fmtUsd(state.strategyStats.spreadRealisedPnl)} fills ${state.strategyStats.spreadEntryFills}/${
