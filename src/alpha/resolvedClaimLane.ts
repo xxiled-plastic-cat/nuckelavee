@@ -2,6 +2,7 @@ import type { WalletPosition } from "@alpha-arcade/sdk";
 
 import type { AlphaConfig, AlphaMode } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits, type MarketChainStatus } from "./alphaClient.js";
+import { getPosition, positionKey } from "./inventoryView.js";
 import { saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaPaperPosition } from "./alphaTypes.js";
 
@@ -12,6 +13,8 @@ export type ClaimAction = {
   message: string;
 };
 
+const CLAIM_EPS = 1e-6;
+
 function fmtUsd(value: number): string {
   return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(4)}`;
 }
@@ -20,10 +23,9 @@ function findStatePositionEntry(
   state: AlphaBotState,
   marketAppId: number,
 ): { key: string; position: AlphaPaperPosition } | undefined {
-  for (const [key, position] of Object.entries(state.positionsByMarket)) {
-    if (position.marketAppId === marketAppId) return { key, position };
-  }
-  return undefined;
+  const position = getPosition(state, marketAppId);
+  if (!position) return undefined;
+  return { key: positionKey(marketAppId), position };
 }
 
 /**
@@ -32,7 +34,7 @@ function findStatePositionEntry(
  * For any other (e.g. voided) outcome we cannot reliably value the redemption,
  * so we still claim but leave realised PnL untouched.
  */
-function usdcForSide(outcome: number | undefined, side: "YES" | "NO", shares: number): number | undefined {
+export function usdcForSide(outcome: number | undefined, side: "YES" | "NO", shares: number): number | undefined {
   if (outcome === 1) return side === "YES" ? shares : 0;
   if (outcome === 0) return side === "NO" ? shares : 0;
   return undefined;
@@ -52,6 +54,51 @@ function describeSideResult(outcome: number | undefined, side: "YES" | "NO", sha
   const pnlLabel = pnl >= 0 ? `+$${pnl.toFixed(4)}` : `-$${Math.abs(pnl).toFixed(4)}`;
   if (usdc === 0) return `${shares.toFixed(6)} ${side} share(s); LOSING side → $0.00 USDC (${pnlLabel})`;
   return `${shares.toFixed(6)} ${side} share(s); WINNING side → ~$${usdc.toFixed(2)} USDC (${pnlLabel})`;
+}
+
+/**
+ * Apply a successful free-share claim to bot state. Subtracts only the claimed
+ * free amount from totals (free+escrow); never wipes escrowed inventory.
+ * Realises PnL only for known YES/NO outcomes.
+ */
+export function applyClaimedFreeSharesToState(
+  state: AlphaBotState,
+  marketAppId: number,
+  side: "YES" | "NO",
+  freeSharesClaimed: number,
+  outcome: number | undefined,
+): { realised?: number; remaining: number } {
+  const entry = findStatePositionEntry(state, marketAppId);
+  if (!entry || freeSharesClaimed <= CLAIM_EPS) {
+    return { remaining: entry ? (side === "YES" ? entry.position.yesShares : entry.position.noShares) : 0 };
+  }
+  const { position, key } = entry;
+  const avgCost = side === "YES" ? position.avgYesCost ?? 0 : position.avgNoCost ?? 0;
+  const usdc = usdcForSide(outcome, side, freeSharesClaimed);
+  let realised: number | undefined;
+  if (usdc !== undefined) {
+    realised = usdc - freeSharesClaimed * avgCost;
+    position.realisedPnl += realised;
+    state.realisedPnl += realised;
+  }
+  if (side === "YES") {
+    position.yesShares = Math.max(0, position.yesShares - freeSharesClaimed);
+    if (position.yesShares <= CLAIM_EPS) {
+      position.yesShares = 0;
+      position.avgYesCost = 0;
+    }
+  } else {
+    position.noShares = Math.max(0, position.noShares - freeSharesClaimed);
+    if (position.noShares <= CLAIM_EPS) {
+      position.noShares = 0;
+      position.avgNoCost = 0;
+    }
+  }
+  if (position.yesShares <= CLAIM_EPS && position.noShares <= CLAIM_EPS) {
+    delete state.positionsByMarket[key];
+    return { realised, remaining: 0 };
+  }
+  return { realised, remaining: side === "YES" ? position.yesShares : position.noShares };
 }
 
 export async function runResolvedClaimLane(input: {
@@ -126,31 +173,13 @@ export async function runResolvedClaimLane(input: {
 
       try {
         const result = await liveClient.claim({ marketAppId: position.marketAppId, assetId });
-        const usdc = usdcForSide(outcome, side, shares);
-        let realised: number | undefined;
-        if (entry) {
-          if (usdc !== undefined) {
-            realised = usdc - shares * avgCost;
-            entry.position.realisedPnl += realised;
-            state.realisedPnl += realised;
-          }
-          if (side === "YES") {
-            entry.position.yesShares = 0;
-            entry.position.avgYesCost = 0;
-          } else {
-            entry.position.noShares = 0;
-            entry.position.avgNoCost = 0;
-          }
-          if (entry.position.yesShares <= 1e-6 && entry.position.noShares <= 1e-6) {
-            delete state.positionsByMarket[entry.key];
-          }
-        }
+        const applied = applyClaimedFreeSharesToState(state, position.marketAppId, side, shares, outcome);
         await saveAlphaState(config.stateKey, state);
         actions.push({
           kind: "claim",
           message: `Claimed ${title} ${side}: ${sideDesc}${
-            realised !== undefined ? `; realised=${fmtUsd(realised)}` : ""
-          } txIds=${result.txIds.join(",")}`,
+            applied.realised !== undefined ? `; realised=${fmtUsd(applied.realised)}` : ""
+          } remaining=${applied.remaining.toFixed(6)} txIds=${result.txIds.join(",")}`,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

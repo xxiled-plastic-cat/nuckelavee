@@ -437,11 +437,11 @@ function summarizeTickActions(actions: LiveAction[]): {
       summary.recycleEvents.push(action.message);
       continue;
     }
-    if (action.message.startsWith("Inferred live entry fill")) {
+    if (action.message.startsWith("Live entry fill") || action.message.startsWith("Inferred live entry fill") || action.message.startsWith("Inferred live fill")) {
       summary.inferredEntryFills.push(action.message);
       continue;
     }
-    if (action.message.startsWith("Inferred live exit fill")) {
+    if (action.message.startsWith("Live exit fill") || action.message.startsWith("Inferred live exit fill")) {
       summary.inferredExitFills.push(action.message);
       continue;
     }

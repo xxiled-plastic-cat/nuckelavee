@@ -11,6 +11,23 @@ type ParityAction = {
 
 type ParityMode = Extract<AlphaMode, "live-dry-run" | "live">;
 
+export type ParityResidual = {
+  kind: "buy_merge_one_side" | "buy_merge_unmerged" | "split_sell_unmatched";
+  marketAppId: number;
+  title: string;
+  shares: number;
+  /** Side still stranded after a partial buy-merge (when applicable). */
+  outcome?: "YES" | "NO";
+  message: string;
+};
+
+export type ParityExecuteResult = {
+  ok: boolean;
+  txIds: string[];
+  residual?: ParityResidual;
+  error?: string;
+};
+
 function attempt(plan: AlphaParityPlan, mode: ParityMode, status: AlphaParityAttempt["status"], reason?: string, txIds: string[] = []): AlphaParityAttempt {
   return {
     ...plan,
@@ -56,6 +73,66 @@ function planMessage(prefix: string, plan: AlphaParityPlan): string {
 
 function formatUsd(value: number): string {
   return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(4)}`;
+}
+
+export function describeParityResidual(residual: ParityResidual): string {
+  return `Parity residual (${residual.kind}) ${residual.title} appId=${residual.marketAppId}: ${residual.message}`;
+}
+
+/**
+ * Pure planner for buy-merge mid-leg failure: after one side fills and the other
+ * fails, unwind by market-selling the filled side. Used by execute path and tests.
+ */
+export function planBuyMergeUnwind(input: {
+  filledOutcome: "YES" | "NO";
+  failedLeg: string;
+  marketAppId: number;
+  title: string;
+  shares: number;
+  unwindSucceeded: boolean;
+  unwindError?: string;
+}): { residual?: ParityResidual; reason: string } {
+  if (input.unwindSucceeded) {
+    return {
+      reason: `${input.failedLeg} failed after ${input.filledOutcome} fill; unwound ${input.filledOutcome} successfully`,
+    };
+  }
+  const residual: ParityResidual = {
+    kind: "buy_merge_one_side",
+    marketAppId: input.marketAppId,
+    title: input.title,
+    shares: input.shares,
+    outcome: input.filledOutcome,
+    message: `${input.failedLeg} failed after ${input.filledOutcome} fill; unwind sell also failed (${input.unwindError ?? "unknown"}): stranded ${input.shares.toFixed(6)} ${input.filledOutcome}`,
+  };
+  return { residual, reason: residual.message };
+}
+
+/**
+ * Pure planner for split-sell mid-leg failure: attempt merge-back of remaining
+ * matched free sets; otherwise record an unmatched residual.
+ */
+export function planSplitSellResidual(input: {
+  marketAppId: number;
+  title: string;
+  shares: number;
+  failedLeg: string;
+  mergeBackSucceeded: boolean;
+  mergeBackError?: string;
+}): { residual?: ParityResidual; reason: string } {
+  if (input.mergeBackSucceeded) {
+    return {
+      reason: `${input.failedLeg} failed after split; merge-back of matched free sets succeeded`,
+    };
+  }
+  const residual: ParityResidual = {
+    kind: "split_sell_unmatched",
+    marketAppId: input.marketAppId,
+    title: input.title,
+    shares: input.shares,
+    message: `${input.failedLeg} failed after split; merge-back also failed (${input.mergeBackError ?? "unknown"}): stranded ~${input.shares.toFixed(6)} YES/NO from split`,
+  };
+  return { residual, reason: residual.message };
 }
 
 function validatePlan(
@@ -108,52 +185,165 @@ async function executeBuyMerge(
   liveClient: AlphaSdkClient,
   plan: AlphaParityPlan,
   config: AlphaConfig,
-): Promise<string[]> {
+): Promise<ParityExecuteResult> {
   const slippage = config.paritySlippageCents / 100;
-  const yes = await liveClient.createMarketOrder({
-    marketAppId: plan.marketAppId,
-    outcome: "YES",
-    price: plan.yesPrice,
-    sizeShares: plan.sizeShares,
-    isBuying: true,
-    slippage,
-  });
-  const no = await liveClient.createMarketOrder({
-    marketAppId: plan.marketAppId,
-    outcome: "NO",
-    price: plan.noPrice,
-    sizeShares: plan.sizeShares,
-    isBuying: true,
-    slippage,
-  });
-  const merge = await liveClient.mergeShares({ marketAppId: plan.marketAppId, amountShares: plan.sizeShares });
-  return [...yes.txIds, ...no.txIds, ...merge.txIds];
+  const txIds: string[] = [];
+
+  try {
+    const yes = await liveClient.createMarketOrder({
+      marketAppId: plan.marketAppId,
+      outcome: "YES",
+      price: plan.yesPrice,
+      sizeShares: plan.sizeShares,
+      isBuying: true,
+      slippage,
+    });
+    txIds.push(...yes.txIds);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, txIds, error: `YES buy failed: ${message}` };
+  }
+
+  try {
+    const no = await liveClient.createMarketOrder({
+      marketAppId: plan.marketAppId,
+      outcome: "NO",
+      price: plan.noPrice,
+      sizeShares: plan.sizeShares,
+      isBuying: true,
+      slippage,
+    });
+    txIds.push(...no.txIds);
+  } catch (error) {
+    const failedMsg = error instanceof Error ? error.message : String(error);
+    try {
+      const unwind = await liveClient.createMarketOrder({
+        marketAppId: plan.marketAppId,
+        outcome: "YES",
+        price: plan.yesPrice,
+        sizeShares: plan.sizeShares,
+        isBuying: false,
+        slippage,
+      });
+      txIds.push(...unwind.txIds);
+      const planned = planBuyMergeUnwind({
+        filledOutcome: "YES",
+        failedLeg: `NO buy (${failedMsg})`,
+        marketAppId: plan.marketAppId,
+        title: plan.title,
+        shares: plan.sizeShares,
+        unwindSucceeded: true,
+      });
+      return { ok: false, txIds, error: planned.reason };
+    } catch (unwindError) {
+      const unwindMsg = unwindError instanceof Error ? unwindError.message : String(unwindError);
+      const planned = planBuyMergeUnwind({
+        filledOutcome: "YES",
+        failedLeg: `NO buy (${failedMsg})`,
+        marketAppId: plan.marketAppId,
+        title: plan.title,
+        shares: plan.sizeShares,
+        unwindSucceeded: false,
+        unwindError: unwindMsg,
+      });
+      return { ok: false, txIds, residual: planned.residual, error: planned.reason };
+    }
+  }
+
+  try {
+    const merge = await liveClient.mergeShares({ marketAppId: plan.marketAppId, amountShares: plan.sizeShares });
+    txIds.push(...merge.txIds);
+    return { ok: true, txIds };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const residual: ParityResidual = {
+      kind: "buy_merge_unmerged",
+      marketAppId: plan.marketAppId,
+      title: plan.title,
+      shares: plan.sizeShares,
+      message: `YES+NO bought but merge failed (${message}): stranded matched free sets (inventory merge may recover)`,
+    };
+    return { ok: false, txIds, residual, error: residual.message };
+  }
 }
 
 async function executeSplitSell(
   liveClient: AlphaSdkClient,
   plan: AlphaParityPlan,
   config: AlphaConfig,
-): Promise<string[]> {
+): Promise<ParityExecuteResult> {
   const slippage = config.paritySlippageCents / 100;
-  const split = await liveClient.splitShares({ marketAppId: plan.marketAppId, amountUsd: plan.sizeShares });
-  const yes = await liveClient.createMarketOrder({
-    marketAppId: plan.marketAppId,
-    outcome: "YES",
-    price: plan.yesPrice,
-    sizeShares: plan.sizeShares,
-    isBuying: false,
-    slippage,
-  });
-  const no = await liveClient.createMarketOrder({
-    marketAppId: plan.marketAppId,
-    outcome: "NO",
-    price: plan.noPrice,
-    sizeShares: plan.sizeShares,
-    isBuying: false,
-    slippage,
-  });
-  return [...split.txIds, ...yes.txIds, ...no.txIds];
+  const txIds: string[] = [];
+
+  try {
+    const split = await liveClient.splitShares({ marketAppId: plan.marketAppId, amountUsd: plan.sizeShares });
+    txIds.push(...split.txIds);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, txIds, error: `split failed: ${message}` };
+  }
+
+  try {
+    const yes = await liveClient.createMarketOrder({
+      marketAppId: plan.marketAppId,
+      outcome: "YES",
+      price: plan.yesPrice,
+      sizeShares: plan.sizeShares,
+      isBuying: false,
+      slippage,
+    });
+    txIds.push(...yes.txIds);
+  } catch (error) {
+    const failedMsg = error instanceof Error ? error.message : String(error);
+    try {
+      const mergeBack = await liveClient.mergeShares({ marketAppId: plan.marketAppId, amountShares: plan.sizeShares });
+      txIds.push(...mergeBack.txIds);
+      const planned = planSplitSellResidual({
+        marketAppId: plan.marketAppId,
+        title: plan.title,
+        shares: plan.sizeShares,
+        failedLeg: `YES sell (${failedMsg})`,
+        mergeBackSucceeded: true,
+      });
+      return { ok: false, txIds, error: planned.reason };
+    } catch (mergeError) {
+      const mergeMsg = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      const planned = planSplitSellResidual({
+        marketAppId: plan.marketAppId,
+        title: plan.title,
+        shares: plan.sizeShares,
+        failedLeg: `YES sell (${failedMsg})`,
+        mergeBackSucceeded: false,
+        mergeBackError: mergeMsg,
+      });
+      return { ok: false, txIds, residual: planned.residual, error: planned.reason };
+    }
+  }
+
+  try {
+    const no = await liveClient.createMarketOrder({
+      marketAppId: plan.marketAppId,
+      outcome: "NO",
+      price: plan.noPrice,
+      sizeShares: plan.sizeShares,
+      isBuying: false,
+      slippage,
+    });
+    txIds.push(...no.txIds);
+    return { ok: true, txIds };
+  } catch (error) {
+    const failedMsg = error instanceof Error ? error.message : String(error);
+    // YES already sold; remaining NO cannot merge alone. Record residual.
+    const residual: ParityResidual = {
+      kind: "split_sell_unmatched",
+      marketAppId: plan.marketAppId,
+      title: plan.title,
+      shares: plan.sizeShares,
+      outcome: "NO",
+      message: `NO sell failed after YES sell (${failedMsg}): stranded ${plan.sizeShares.toFixed(6)} NO from split`,
+    };
+    return { ok: false, txIds, residual, error: residual.message };
+  }
 }
 
 export async function runParityLane(input: {
@@ -209,15 +399,29 @@ export async function runParityLane(input: {
         actions.push({ kind: "skip", message: `Skipped parity ${plan.title}: candidate disappeared after refresh` });
         continue;
       }
-      const txIds = refreshed.type === "PARITY" ? await executeBuyMerge(liveClient, refreshed, config) : await executeSplitSell(liveClient, refreshed, config);
-      recordExecuted(state, refreshed, mode, txIds);
-      actions.push({ kind: "parity", message: planMessage("Executed", refreshed) });
-      return actions;
+      const result =
+        refreshed.type === "PARITY"
+          ? await executeBuyMerge(liveClient, refreshed, config)
+          : await executeSplitSell(liveClient, refreshed, config);
+      if (result.ok) {
+        recordExecuted(state, refreshed, mode, result.txIds);
+        actions.push({ kind: "parity", message: planMessage("Executed", refreshed) });
+        // One successful parity trade per tick.
+        return actions;
+      }
+      const reason = result.error ?? "parity execution failed";
+      recordFailed(state, refreshed, mode, reason, result.txIds);
+      actions.push({ kind: "skip", message: `Parity failed ${refreshed.title}: ${reason}` });
+      if (result.residual) {
+        actions.push({ kind: "parity", message: describeParityResidual(result.residual) });
+      }
+      // Continue the queue after failure so later candidates can still run.
+      continue;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       recordFailed(state, plan, mode, reason);
       actions.push({ kind: "skip", message: `Parity failed ${plan.title}: ${reason}` });
-      return actions;
+      continue;
     }
   }
   return actions;

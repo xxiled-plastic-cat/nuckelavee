@@ -441,14 +441,25 @@ export class AlphaSdkClient {
     price: number;
     sizeShares: number;
     isBuying: boolean;
-  }): Promise<{ escrowAppId: number; txIds: string[]; confirmedRound: number }> {
-    return this.client.createLimitOrder({
+  }): Promise<{
+    escrowAppId: number;
+    txIds: string[];
+    confirmedRound: number;
+    matchedQuantity?: number;
+    matchedPrice?: number;
+  }> {
+    const result = await this.client.createLimitOrder({
       marketAppId: input.marketAppId,
       position: input.outcome === "YES" ? 1 : 0,
       price: toMicroUnits(input.price),
       quantity: toMicroUnits(input.sizeShares),
       isBuying: input.isBuying,
     });
+    return {
+      ...result,
+      matchedQuantity: fromMicroUnits(result.matchedQuantity),
+      matchedPrice: fromMicroUnits(result.matchedPrice),
+    };
   }
 
   async createMarketOrder(input: {

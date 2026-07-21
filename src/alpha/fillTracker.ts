@@ -1,4 +1,5 @@
 import type { AlphaBotState, AlphaOrderbook, AlphaPaperOrder } from "./alphaTypes.js";
+import { applyAskFillToPosition, applyBidFillToPosition } from "./positionAccounting.js";
 
 function bestOpposingPrice(order: AlphaPaperOrder, book: AlphaOrderbook): number | undefined {
   if (order.outcome === "YES" && order.side === "bid") return book.yesAsk;
@@ -9,46 +10,6 @@ function bestOpposingPrice(order: AlphaPaperOrder, book: AlphaOrderbook): number
 
 function crossed(order: AlphaPaperOrder, price: number): boolean {
   return order.side === "bid" ? price <= order.price : price >= order.price;
-}
-
-function ensurePosition(state: AlphaBotState, order: AlphaPaperOrder) {
-  state.positionsByMarket[order.marketId] ??= {
-    marketId: order.marketId,
-    marketAppId: order.marketAppId,
-    slug: order.slug,
-    title: order.title,
-    yesShares: 0,
-    noShares: 0,
-    avgYesCost: 0,
-    avgNoCost: 0,
-    realisedPnl: 0,
-    unrealisedPnl: 0,
-  };
-  return state.positionsByMarket[order.marketId];
-}
-
-function applyBidFill(state: AlphaBotState, order: AlphaPaperOrder, shares: number): void {
-  const position = ensurePosition(state, order);
-  if (order.outcome === "YES") {
-    const cost = position.yesShares * position.avgYesCost + shares * order.price;
-    position.yesShares += shares;
-    position.avgYesCost = position.yesShares > 0 ? cost / position.yesShares : 0;
-  } else {
-    const cost = position.noShares * position.avgNoCost + shares * order.price;
-    position.noShares += shares;
-    position.avgNoCost = position.noShares > 0 ? cost / position.noShares : 0;
-  }
-}
-
-function applyAskFill(state: AlphaBotState, order: AlphaPaperOrder, shares: number): void {
-  const position = ensurePosition(state, order);
-  const avgCost = order.outcome === "YES" ? position.avgYesCost : position.avgNoCost;
-  const pnl = (order.price - avgCost) * shares;
-  if (order.outcome === "YES") position.yesShares = Math.max(0, position.yesShares - shares);
-  else position.noShares = Math.max(0, position.noShares - shares);
-  position.realisedPnl += pnl;
-  state.realisedPnl += pnl;
-  state.cash += order.price * shares;
 }
 
 export function detectPaperFills(state: AlphaBotState, books: Map<number, AlphaOrderbook>): AlphaPaperOrder[] {
@@ -65,8 +26,8 @@ export function detectPaperFills(state: AlphaBotState, books: Map<number, AlphaO
     order.remainingShares = 0;
     order.status = "filled";
     order.updatedAt = new Date().toISOString();
-    if (order.side === "bid") applyBidFill(state, order, shares);
-    else applyAskFill(state, order, shares);
+    if (order.side === "bid") applyBidFillToPosition(state, order, shares);
+    else applyAskFillToPosition(state, order, shares, order.price, { updateCash: true });
     fills.push({ ...order });
   }
   if (fills.length > 0) {

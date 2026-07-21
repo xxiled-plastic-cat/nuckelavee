@@ -1,7 +1,7 @@
 import type { AlphaConfig, AlphaMode } from "./alphaConfig.js";
 import { validateLiveConfig } from "./alphaConfig.js";
 import { AlphaSdkClient, fromMicroUnits, roundShares } from "./alphaClient.js";
-import { checkQuoteRisk } from "./alphaRiskManager.js";
+import { checkQuoteRisk, getInventoryNotionalUsd } from "./alphaRiskManager.js";
 import { loadAlphaState, saveAlphaState } from "./alphaStateStore.js";
 import type { AlphaBotState, AlphaMarket, AlphaOrderbook, AlphaOutcome, AlphaPaperOrder, AlphaPaperPosition, AlphaQuote } from "./alphaTypes.js";
 import type { AlphaScanResult } from "./alphaMarketScanner.js";
@@ -12,6 +12,21 @@ import { runResolvedClaimLane } from "./resolvedClaimLane.js";
 import { updateUnrealisedPnl } from "./pnlTracker.js";
 import { accrueEstimatedRewards } from "./rewardTracker.js";
 import { buildCapitalLedger, mergeCapitalLedgerIntoState } from "./capitalLedger.js";
+import {
+  applyLiveFillEvents,
+  buildPlaceTimeFillEvent,
+  detectClosedCancels,
+  detectFillDeltasFromWallet,
+} from "./liveFillLedger.js";
+import {
+  buildInventorySnapshot,
+  escrowedSellSharesFor,
+  getPosition,
+  inventoryInvariantMismatches,
+  migratePositionsToAppIdKeys,
+  syncPositionsFromInventory,
+  INVENTORY_SHARE_EPSILON,
+} from "./inventoryView.js";
 import type { OpenOrder, WalletPosition } from "@alpha-arcade/sdk";
 import { isDebugModeEnabled } from "../utils/debugMode.js";
 
@@ -49,18 +64,24 @@ export type LiveTickResult = {
   walletAlgoBalance?: number;
 };
 
-function toTrackedLiveOrder(quote: AlphaQuote, result: { escrowAppId: number; txIds: string[] }): AlphaPaperOrder {
+function toTrackedLiveOrder(
+  quote: AlphaQuote,
+  result: { escrowAppId: number; txIds: string[]; matchedQuantity?: number },
+): AlphaPaperOrder {
   const now = new Date().toISOString();
+  const matchedShares = result.matchedQuantity ?? 0;
+  const filledShares = Math.max(0, matchedShares);
+  const remainingShares = Math.max(0, quote.sizeShares - filledShares);
   return {
     ...quote,
     id: `live:${result.escrowAppId}`,
     runMode: "live",
     createdAt: now,
     updatedAt: now,
-    status: "open",
-    reservedUsd: quote.side === "bid" ? quote.notionalUsd : 0,
-    filledShares: 0,
-    remainingShares: quote.sizeShares,
+    status: remainingShares > 1e-9 ? "open" : "filled",
+    reservedUsd: quote.side === "bid" ? quote.price * remainingShares : 0,
+    filledShares,
+    remainingShares,
     liveEscrowAppId: result.escrowAppId,
     liveTxIds: result.txIds,
   };
@@ -164,142 +185,8 @@ function mergeLiveOrdersFromWallet(
   return { synced: openLive.length, closedOrders };
 }
 
-function mergeLivePositionsFromWallet(state: AlphaBotState, positions: WalletPosition[], marketByAppId: Map<number, AlphaMarket>): number {
-  let synced = 0;
-  for (const position of positions) {
-    const yesShares = fromMicroUnits(position.yesBalance) ?? 0;
-    const noShares = fromMicroUnits(position.noBalance) ?? 0;
-    if (yesShares <= 0 && noShares <= 0) continue;
-    const market = marketByAppId.get(position.marketAppId);
-    const marketId = market?.id ?? String(position.marketAppId);
-    const previous = state.positionsByMarket[marketId];
-    state.positionsByMarket[marketId] = {
-      marketId,
-      marketAppId: position.marketAppId,
-      slug: market?.slug ?? previous?.slug,
-      title: market?.title ?? previous?.title ?? position.title,
-      yesShares,
-      noShares,
-      avgYesCost: previous?.avgYesCost ?? 0,
-      avgNoCost: previous?.avgNoCost ?? 0,
-      realisedPnl: previous?.realisedPnl ?? 0,
-      unrealisedPnl: previous?.unrealisedPnl ?? 0,
-      lastMark: previous?.lastMark,
-    };
-    synced += 1;
-  }
-  return synced;
-}
-
 function positionShareCount(position: { yesShares: number; noShares: number }, outcome: AlphaOutcome): number {
   return outcome === "YES" ? position.yesShares : position.noShares;
-}
-
-type PositionSnapshot = Record<string, { yesShares: number; noShares: number; avgYesCost: number; avgNoCost: number }>;
-
-function snapshotPositions(state: AlphaBotState): PositionSnapshot {
-  return Object.fromEntries(
-    Object.entries(state.positionsByMarket).map(([marketId, position]) => [
-      marketId,
-      {
-        yesShares: position.yesShares,
-        noShares: position.noShares,
-        avgYesCost: position.avgYesCost,
-        avgNoCost: position.avgNoCost,
-      },
-    ]),
-  );
-}
-
-function walletPositionSnapshot(positions: WalletPosition[], marketByAppId: Map<number, AlphaMarket>): PositionSnapshot {
-  const snapshot: PositionSnapshot = {};
-  for (const position of positions) {
-    const market = marketByAppId.get(position.marketAppId);
-    const marketId = market?.id ?? String(position.marketAppId);
-    snapshot[marketId] = {
-      yesShares: fromMicroUnits(position.yesBalance) ?? 0,
-      noShares: fromMicroUnits(position.noBalance) ?? 0,
-      avgYesCost: 0,
-      avgNoCost: 0,
-    };
-  }
-  return snapshot;
-}
-
-function ensureLivePosition(state: AlphaBotState, order: AlphaPaperOrder) {
-  state.positionsByMarket[order.marketId] ??= {
-    marketId: order.marketId,
-    marketAppId: order.marketAppId,
-    slug: order.slug,
-    title: order.title,
-    yesShares: 0,
-    noShares: 0,
-    avgYesCost: 0,
-    avgNoCost: 0,
-    realisedPnl: 0,
-    unrealisedPnl: 0,
-  };
-  return state.positionsByMarket[order.marketId];
-}
-
-function inferClosedLiveOrders(
-  state: AlphaBotState,
-  closedOrders: AlphaPaperOrder[],
-  beforePositions: PositionSnapshot,
-  walletPositions: PositionSnapshot,
-  actions: LiveAction[],
-): void {
-  const now = new Date().toISOString();
-  for (const order of closedOrders) {
-    const before = beforePositions[order.marketId] ?? { yesShares: 0, noShares: 0, avgYesCost: 0, avgNoCost: 0 };
-    const wallet = walletPositions[order.marketId] ?? { yesShares: 0, noShares: 0, avgYesCost: 0, avgNoCost: 0 };
-    const beforeShares = order.outcome === "YES" ? before.yesShares : before.noShares;
-    const walletShares = order.outcome === "YES" ? wallet.yesShares : wallet.noShares;
-    const fill = order.side === "bid" ? Math.min(order.remainingShares, Math.max(0, walletShares - beforeShares)) : Math.min(order.remainingShares, Math.max(0, beforeShares - walletShares));
-
-    if (fill <= 0.000001) {
-      state.cancelledOrders.push({ ...order, status: "cancelled", updatedAt: now });
-      continue;
-    }
-
-    const position = ensureLivePosition(state, order);
-    const filled = { ...order, status: "filled" as const, filledShares: order.filledShares + fill, remainingShares: Math.max(0, order.remainingShares - fill), updatedAt: now };
-    if (order.side === "bid") {
-      const avgCost = order.outcome === "YES" ? before.avgYesCost : before.avgNoCost;
-      const newShares = Math.max(beforeShares + fill, walletShares);
-      const newAvg = newShares > 0 ? (beforeShares * avgCost + fill * order.price) / newShares : 0;
-      if (order.outcome === "YES") {
-        position.yesShares = newShares;
-        position.avgYesCost = newAvg;
-      } else {
-        position.noShares = newShares;
-        position.avgNoCost = newAvg;
-      }
-      if (order.source === "spread") state.strategyStats.spreadEntryFills += 1;
-      actions.push({ kind: "skip", message: `Inferred live fill ${order.title} ${order.outcome} bid ${fill.toFixed(6)} share(s) at ${order.price.toFixed(3)}` });
-    } else {
-      const avgCost = order.outcome === "YES" ? before.avgYesCost : before.avgNoCost;
-      const pnl = (order.price - avgCost) * fill;
-      if (order.outcome === "YES") {
-        position.yesShares = walletShares;
-        if (walletShares <= 0) position.avgYesCost = 0;
-      } else {
-        position.noShares = walletShares;
-        if (walletShares <= 0) position.avgNoCost = 0;
-      }
-      position.realisedPnl += pnl;
-      state.realisedPnl += pnl;
-      if (order.source === "inventory_exit") {
-        state.strategyStats.spreadExitFills += 1;
-        state.strategyStats.spreadRealisedPnl += pnl;
-      }
-      actions.push({
-        kind: "skip",
-        message: `Inferred live exit fill ${order.title} ${order.outcome} ask ${fill.toFixed(6)} share(s) at ${order.price.toFixed(3)}; spreadPnl=${fmtSignedUsd(pnl)}`,
-      });
-    }
-    state.fills.push(filled);
-  }
 }
 
 function fmtSignedUsd(value: number): string {
@@ -430,15 +317,15 @@ function findMarketForPosition(
   return [...marketByAppId.values()].find((market) => market.id === position.marketId);
 }
 
-function trackedOutcomeAgeSeconds(state: AlphaBotState, marketId: string, outcome: AlphaOutcome, now = Date.now()): number | undefined {
+function trackedOutcomeAgeSeconds(state: AlphaBotState, marketAppId: number, outcome: AlphaOutcome, now = Date.now()): number | undefined {
   const timestamps: number[] = [];
   for (const order of state.openOrders) {
-    if (order.runMode !== "live" || order.marketId !== marketId || order.outcome !== outcome || order.side !== "bid") continue;
+    if (order.runMode !== "live" || order.marketAppId !== marketAppId || order.outcome !== outcome || order.side !== "bid") continue;
     const created = Date.parse(order.createdAt);
     if (Number.isFinite(created)) timestamps.push(created);
   }
   for (const fill of state.fills) {
-    if (fill.runMode !== "live" || fill.marketId !== marketId || fill.outcome !== outcome || fill.side !== "bid") continue;
+    if (fill.runMode !== "live" || fill.marketAppId !== marketAppId || fill.outcome !== outcome || fill.side !== "bid") continue;
     const when = Date.parse(fill.updatedAt ?? fill.createdAt);
     if (Number.isFinite(when)) timestamps.push(when);
   }
@@ -450,20 +337,20 @@ function expectedLossUsd(averageCost: number, ask: number, shares: number): numb
   return Math.max(0, (averageCost - ask) * shares);
 }
 
-function controlledUnderwaterMarketLossUsd(state: AlphaBotState, marketId: string, ignoreEscrowAppId?: number): number {
+function controlledUnderwaterMarketLossUsd(state: AlphaBotState, marketAppId: number, ignoreEscrowAppId?: number): number {
   return state.openOrders
     .filter(
       (order) =>
         order.runMode === "live" &&
         order.status === "open" &&
-        order.marketId === marketId &&
+        order.marketAppId === marketAppId &&
         order.source === "inventory_exit" &&
         order.side === "ask" &&
         order.reason.startsWith(CONTROLLED_UNDERWATER_EXIT_REASON) &&
         order.liveEscrowAppId !== ignoreEscrowAppId,
     )
     .reduce((sum, order) => {
-      const position = state.positionsByMarket[order.marketId];
+      const position = getPosition(state, order.marketAppId);
       const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
       if (averageCost === undefined || averageCost <= 0) return sum;
       return sum + expectedLossUsd(averageCost, order.price, order.remainingShares);
@@ -472,18 +359,18 @@ function controlledUnderwaterMarketLossUsd(state: AlphaBotState, marketId: strin
 
 function controlledUnderwaterExitStatus(
   state: AlphaBotState,
-  marketId: string,
+  marketAppId: number,
   outcome: AlphaOutcome,
   ask: number,
   shares: number,
   config: AlphaConfig,
   ignoreEscrowAppId?: number,
 ): { allowed: boolean; reason: string } {
-  const position = state.positionsByMarket[marketId];
+  const position = getPosition(state, marketAppId);
   const averageCost = outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
   if (averageCost === undefined || averageCost <= 0) return { allowed: false, reason: "tracked cost basis unavailable" };
   if (!config.underwaterExitEnabled) return { allowed: false, reason: "underwater exits disabled" };
-  const ageSeconds = trackedOutcomeAgeSeconds(state, marketId, outcome);
+  const ageSeconds = trackedOutcomeAgeSeconds(state, marketAppId, outcome);
   if ((ageSeconds ?? 0) < config.underwaterExitMinAgeHours * 3600) {
     return {
       allowed: false,
@@ -515,7 +402,7 @@ function controlledUnderwaterExitStatus(
     return { allowed: false, reason: `notional $${notional.toFixed(2)} exceeds unwind cap $${notionalCap.toFixed(2)}` };
   }
   if (!config.inventoryExitFullPosition) {
-    const marketLossUsed = controlledUnderwaterMarketLossUsd(state, marketId, ignoreEscrowAppId);
+    const marketLossUsed = controlledUnderwaterMarketLossUsd(state, marketAppId, ignoreEscrowAppId);
     const projectedLoss = expectedLossUsd(averageCost, ask, shares);
     if (marketLossUsed + projectedLoss > config.underwaterExitMaxMarketLossUsd) {
       return {
@@ -545,7 +432,12 @@ function describeMissingExit(
   const costFloorReason = (ask: number) =>
     minimumProfitableAsk !== undefined && ask < minimumProfitableAsk
       ? (() => {
-          const status = controlledUnderwaterExitStatus(state, position.marketId, outcome, ask, shares, config);
+          if (position.marketAppId === undefined) {
+            return `target ask ${ask.toFixed(3)} below cost floor ${minimumProfitableAsk.toFixed(3)} (avg ${averageCost.toFixed(3)} + ${config.spreadExitEdgeCents.toFixed(
+              2,
+            )}c); tracked cost basis available but marketAppId missing`;
+          }
+          const status = controlledUnderwaterExitStatus(state, position.marketAppId, outcome, ask, shares, config);
           return `target ask ${ask.toFixed(3)} below cost floor ${minimumProfitableAsk.toFixed(3)} (avg ${averageCost.toFixed(3)} + ${config.spreadExitEdgeCents.toFixed(
             2,
           )}c); ${status.reason}`;
@@ -692,7 +584,7 @@ function resizeBidQuoteToBudget(
 
 function exitOrderWouldLoseMoney(order: AlphaPaperOrder, state: AlphaBotState, config: AlphaConfig): boolean {
   if (order.source !== "inventory_exit" || order.side !== "ask") return false;
-  const position = state.positionsByMarket[order.marketId];
+  const position = getPosition(state, order.marketAppId);
   const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
   if (averageCost === undefined || averageCost <= 0) return false;
   return order.price < averageCost + config.spreadExitEdgeCents / 100;
@@ -702,7 +594,7 @@ function controlledUnderwaterExitAllowed(order: AlphaPaperOrder, state: AlphaBot
   if (order.source !== "inventory_exit" || order.side !== "ask") return false;
   const status = controlledUnderwaterExitStatus(
     state,
-    order.marketId,
+    order.marketAppId,
     order.outcome,
     order.price,
     order.remainingShares,
@@ -712,12 +604,12 @@ function controlledUnderwaterExitAllowed(order: AlphaPaperOrder, state: AlphaBot
   return status.allowed;
 }
 
-const SHARE_EPSILON = 1e-3;
+const SHARE_EPSILON = INVENTORY_SHARE_EPSILON;
 
 // Consecutive ticks a position must stay unaccounted (absent from wallet free
 // balance AND open sell-order escrow) before it is reconciled and pruned.
 // Guards against transient wallet/API read gaps; always on.
-const STALE_POSITION_PRUNE_TICKS = 3;
+const STALE_POSITION_PRUNE_TICKS = 10;
 
 // How often the live tick re-scans the chain for actual LP reward receipts so
 // the digest's "received" figure stays current without scanning every tick.
@@ -770,85 +662,41 @@ async function refreshActualRewardsReceived(input: {
 }
 
 /**
- * Collapse duplicate state positions that share a marketAppId but were keyed
- * differently across ticks (UUID `market.id` while in-scan vs `String(appId)`
- * once out-of-scan). Duplicates represent the SAME logical holding, so shares
- * are merged by MAX (never summed) to avoid inflating inventory. The UUID key
- * is preferred as canonical so in-scan lookups by `market.id` keep working.
+ * Account for unaccounted shares only when the market is resolved with a known
+ * YES/NO outcome (auto-pay / burn). Unresolved gaps never invent PnL. Voided /
+ * unknown resolutions may prune share counts without mark write-off PnL.
  */
-function dedupePositionsByAppId(state: AlphaBotState): number {
-  const keysByAppId = new Map<number, string[]>();
-  for (const [key, position] of Object.entries(state.positionsByMarket)) {
-    if (position.marketAppId === undefined) continue;
-    const keys = keysByAppId.get(position.marketAppId) ?? [];
-    keys.push(key);
-    keysByAppId.set(position.marketAppId, keys);
-  }
-
-  let merged = 0;
-  for (const [appId, keys] of keysByAppId) {
-    if (keys.length <= 1) continue;
-    const stringKey = String(appId);
-    const canonicalKey = keys.find((key) => key !== stringKey) ?? stringKey;
-    const canonical = state.positionsByMarket[canonicalKey];
-    for (const key of keys) {
-      if (key === canonicalKey) continue;
-      const dup = state.positionsByMarket[key];
-      canonical.yesShares = Math.max(canonical.yesShares, dup.yesShares);
-      canonical.noShares = Math.max(canonical.noShares, dup.noShares);
-      canonical.avgYesCost = canonical.avgYesCost || dup.avgYesCost;
-      canonical.avgNoCost = canonical.avgNoCost || dup.avgNoCost;
-      canonical.lastMark = canonical.lastMark ?? dup.lastMark;
-      canonical.title = canonical.title || dup.title;
-      canonical.slug = canonical.slug ?? dup.slug;
-      canonical.unaccountedTicks = Math.max(canonical.unaccountedTicks ?? 0, dup.unaccountedTicks ?? 0);
-      delete state.positionsByMarket[key];
-      merged += 1;
-    }
-  }
-  return merged;
-}
-
-function escrowedSellSharesFor(walletOrders: OpenOrder[], marketAppId: number, outcome: AlphaOutcome): number {
-  const positionFlag = outcome === "YES" ? 1 : 0;
-  return walletOrders
-    .filter((order) => order.marketAppId === marketAppId && order.side === 0 && order.position === positionFlag)
-    .reduce((sum, order) => sum + (fromMicroUnits(Math.max(0, order.quantity - order.quantityFilled)) ?? 0), 0);
-}
-
-/**
- * Realise PnL for a stale (unaccounted) side of a position whose tokens are no
- * longer in the wallet. Winning resolved sides were auto-paid $1/share to the
- * wallet already; losing sides burned; unresolved-but-gone shares are written
- * off at last mark. Returns the realised delta (added to ledger by caller).
- */
-function realiseStaleSide(
+export function realiseStaleSide(
   position: AlphaPaperPosition,
   outcome: AlphaOutcome,
   shares: number,
   resolution: { isResolved?: boolean; outcome?: number },
-): { realised: number; note: string } {
+): { realised: number; note: string; allowMutate: boolean; realisePnl: boolean } {
   const avgCost = outcome === "YES" ? position.avgYesCost ?? 0 : position.avgNoCost ?? 0;
   const cost = shares * avgCost;
-  if (resolution.isResolved === true) {
-    const sideWon = (resolution.outcome === 1 && outcome === "YES") || (resolution.outcome === 0 && outcome === "NO");
-    if (resolution.outcome === 1 || resolution.outcome === 0) {
-      const proceeds = sideWon ? shares : 0;
-      return {
-        realised: proceeds - cost,
-        note: `resolved ${describeResolutionOutcome(resolution.outcome)}; ${sideWon ? "WON" : "LOST"} → proceeds $${proceeds.toFixed(2)} (auto-paid to wallet), cost $${cost.toFixed(2)}`,
-      };
-    }
-    const mark = position.lastMark ?? 0;
+  if (resolution.isResolved !== true) {
     return {
-      realised: mark * shares - cost,
-      note: `resolved voided/unknown (outcome=${resolution.outcome}); written off at last mark ${mark.toFixed(3)}`,
+      realised: 0,
+      note: "not resolved on-chain; deferring PnL and prune (API gap / transient read)",
+      allowMutate: false,
+      realisePnl: false,
     };
   }
-  const mark = position.lastMark ?? 0;
+  if (resolution.outcome === 1 || resolution.outcome === 0) {
+    const sideWon = (resolution.outcome === 1 && outcome === "YES") || (resolution.outcome === 0 && outcome === "NO");
+    const proceeds = sideWon ? shares : 0;
+    return {
+      realised: proceeds - cost,
+      note: `resolved ${describeResolutionOutcome(resolution.outcome)}; ${sideWon ? "WON" : "LOST"} → proceeds $${proceeds.toFixed(2)} (auto-paid to wallet), cost $${cost.toFixed(2)}`,
+      allowMutate: true,
+      realisePnl: true,
+    };
+  }
   return {
-    realised: mark * shares - cost,
-    note: `not resolved on-chain but absent from wallet/escrow; written off at last mark ${mark.toFixed(3)}`,
+    realised: 0,
+    note: `resolved voided/unknown (outcome=${resolution.outcome}); pruning unaccounted shares without mark write-off`,
+    allowMutate: true,
+    realisePnl: false,
   };
 }
 
@@ -861,12 +709,9 @@ function describeResolutionOutcome(outcome: number | undefined): string {
 
 /**
  * Reconcile each bot-state position against the wallet's actual free ASA
- * balance plus shares escrowed in open SELL orders. getPositions only returns
- * free wallet balances; shares resting in a sell order live in that order's
- * escrow app and are excluded. A position is only genuinely "gone" (resolved,
- * redeemed, burned, or stale state) when its state shares are accounted for by
- * neither the free balance nor any open sell-order escrow. Persistently
- * unaccounted positions are resolved/written-off and pruned (live mode only).
+ * balance plus shares escrowed in open SELL orders. Persistently unaccounted
+ * sides only mutate realised PnL when the market is resolved with a known
+ * YES/NO outcome. Unresolved gaps warn only and never invent mark write-offs.
  */
 async function reconcilePositions(input: {
   liveClient: AlphaSdkClient;
@@ -879,9 +724,9 @@ async function reconcilePositions(input: {
 }): Promise<void> {
   const { liveClient, config, mode, state, walletPositions, walletOrders, actions } = input;
 
-  const merged = dedupePositionsByAppId(state);
-  if (merged > 0) {
-    actions.push({ kind: "skip", message: `Position reconcile: merged ${merged} duplicate state key(s) by marketAppId` });
+  const migrated = migratePositionsToAppIdKeys(state);
+  if (migrated > 0) {
+    actions.push({ kind: "skip", message: `Position reconcile: migrated ${migrated} duplicate state key(s) onto marketAppId` });
   }
 
   const walletByAppId = new Map<number, WalletPosition>();
@@ -954,15 +799,25 @@ async function reconcilePositions(input: {
       continue;
     }
 
+    let mutated = false;
     for (const outcome of ["YES", "NO"] as const) {
       const unaccounted = sideState[outcome].unaccounted;
       if (unaccounted <= SHARE_EPSILON) continue;
-      const { realised, note } = realiseStaleSide(position, outcome, unaccounted, resolution);
+      const { realised, note, allowMutate, realisePnl } = realiseStaleSide(position, outcome, unaccounted, resolution);
       const accounted = sideState[outcome].free + sideState[outcome].escrow;
+      if (!allowMutate) {
+        actions.push({
+          kind: "skip",
+          message: `Position reconcile: ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}`,
+        });
+        continue;
+      }
       if (mode === "live-dry-run") {
         actions.push({
           kind: "claim",
-          message: `Would reconcile ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}; realised=${fmtSignedUsd(realised)}`,
+          message: `Would reconcile ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}${
+            realisePnl ? `; realised=${fmtSignedUsd(realised)}` : "; no PnL mutation"
+          }`,
         });
         continue;
       }
@@ -973,15 +828,20 @@ async function reconcilePositions(input: {
         position.noShares = accounted;
         if (position.noShares <= SHARE_EPSILON) position.avgNoCost = 0;
       }
-      position.realisedPnl += realised;
-      state.realisedPnl += realised;
+      if (realisePnl) {
+        position.realisedPnl += realised;
+        state.realisedPnl += realised;
+      }
+      mutated = true;
       actions.push({
         kind: "claim",
-        message: `Reconciled ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}; realised=${fmtSignedUsd(realised)}`,
+        message: `Reconciled ${title} ${outcome} ${unaccounted.toFixed(6)} stale share(s): ${note}${
+          realisePnl ? `; realised=${fmtSignedUsd(realised)}` : "; no PnL mutation"
+        }`,
       });
     }
 
-    if (mode === "live") {
+    if (mode === "live" && mutated) {
       position.unaccountedTicks = 0;
       if (position.yesShares <= SHARE_EPSILON && position.noShares <= SHARE_EPSILON) {
         delete state.positionsByMarket[key];
@@ -1189,8 +1049,9 @@ export async function runLiveTick(
     prunedSpreadStats: spreadStatsPrune.pruned,
   });
 
-  const beforePositions = snapshotPositions(state);
-  logLiveMemory("after_position_snapshot", { snapshotPositions: Object.keys(beforePositions).length });
+  const previousLiveOrders = state.openOrders.filter(
+    (order) => order.runMode === "live" && order.liveEscrowAppId !== undefined && order.status === "open",
+  );
   let walletOrders: OpenOrder[] = [];
   try {
     walletOrders = await loadWalletOpenOrders(liveClient, config.walletAddress, marketByAppId);
@@ -1206,16 +1067,56 @@ export async function runLiveTick(
   const { synced: syncedLiveOrders, closedOrders } = mergeLiveOrdersFromWallet(state, walletOrders, marketByAppId);
   actions.push({ kind: "skip", message: `Synced ${syncedLiveOrders} open live order(s) from wallet` });
   logLiveMemory("after_merge_live_orders", { syncedLiveOrders, closedOrders: closedOrders.length, stateOpenOrders: state.openOrders.length });
-  let walletPositions: PositionSnapshot = {};
+
+  state.liveFillCursorByEscrow ??= {};
+  state.liveFillEvents ??= [];
+  const fillEvents = detectFillDeltasFromWallet({
+    previousLiveOrders,
+    walletOrders,
+    cursor: state.liveFillCursorByEscrow,
+  });
+  for (const result of applyLiveFillEvents(state, fillEvents)) {
+    if (result.applied) actions.push({ kind: "skip", message: result.message });
+  }
+  const closedCancels = detectClosedCancels({
+    closedOrders,
+    cursor: state.liveFillCursorByEscrow,
+  });
+  if (closedCancels.length > 0) {
+    state.cancelledOrders.push(...closedCancels);
+    for (const cancelled of closedCancels) {
+      actions.push({
+        kind: "skip",
+        message: `Live cancel ${cancelled.title} ${cancelled.outcome} ${cancelled.side} escrowAppId=${cancelled.liveEscrowAppId}; unfilled ${cancelled.remainingShares.toFixed(6)} share(s)`,
+      });
+    }
+  }
+  logLiveMemory("after_fill_ledger", {
+    fillEvents: fillEvents.length,
+    fills: state.fills.length,
+    cancelled: state.cancelledOrders.length,
+    actions: actions.length,
+  });
+
   let rawWalletPositions: WalletPosition[] = [];
   let positionsSynced = false;
   try {
     const positions = await liveClient.getPositions(config.walletAddress);
     rawWalletPositions = positions;
-    walletPositions = walletPositionSnapshot(positions, marketByAppId);
     positionsSynced = true;
-    const syncedPositions = mergeLivePositionsFromWallet(state, positions, marketByAppId);
-    actions.push({ kind: "skip", message: `Synced ${syncedPositions} live position(s) from wallet` });
+    const migrated = migratePositionsToAppIdKeys(state);
+    if (migrated > 0) {
+      actions.push({ kind: "skip", message: `Migrated ${migrated} position key(s) onto marketAppId` });
+    }
+    const inventorySnapshot = buildInventorySnapshot(rawWalletPositions, walletOrders);
+    const syncedPositions = syncPositionsFromInventory(state, inventorySnapshot, marketByAppId);
+    actions.push({
+      kind: "skip",
+      message: `Synced ${syncedPositions} live position(s) from wallet free+escrow inventory`,
+    });
+    for (const mismatch of inventoryInvariantMismatches(state, inventorySnapshot)) {
+      actions.push({ kind: "skip", message: mismatch.message });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[alpha-live] position sync failed: ${message}`);
@@ -1226,19 +1127,16 @@ export async function runLiveTick(
     walletPositions: rawWalletPositions.length,
     statePositions: Object.keys(state.positionsByMarket).length,
   });
-  if (positionsSynced) {
-    inferClosedLiveOrders(state, closedOrders, beforePositions, walletPositions, actions);
-  } else {
-    state.cancelledOrders.push(...closedOrders.map((order) => ({ ...order, status: "cancelled" as const, updatedAt: new Date().toISOString() })));
-  }
-  logLiveMemory("after_fill_inference", {
-    fills: state.fills.length,
-    cancelled: state.cancelledOrders.length,
-    actions: actions.length,
-  });
   if (positionsSynced && rawWalletPositions.length > 0) {
     actions.push(
-      ...(await runInventoryMergeLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
+      ...(await runInventoryMergeLane({
+        liveClient,
+        config,
+        mode,
+        walletPositions: rawWalletPositions,
+        walletOrders,
+        state,
+      })),
     );
     actions.push(
       ...(await runResolvedClaimLane({ liveClient, config, mode, walletPositions: rawWalletPositions, state })),
@@ -1525,10 +1423,7 @@ export async function runLiveTick(
   ).length;
   const rewardQueueCap = Math.max(0, config.rewardMaxLiveOpenOrders - openRewardOrders);
   const spreadQueueCap = Math.max(0, config.spreadMaxLiveOpenOrders - openSpreadEntryOrders);
-  const heldInventoryNotionalUsd = Object.values(state.positionsByMarket).reduce(
-    (sum, position) => sum + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost,
-    0,
-  );
+  const heldInventoryNotionalUsd = getInventoryNotionalUsd(state);
   const inventoryGovernorActive =
     config.maxInventoryNotionalUsd > 0 && heldInventoryNotionalUsd >= config.maxInventoryNotionalUsd;
   if (inventoryGovernorActive) {
@@ -1690,7 +1585,20 @@ export async function runLiveTick(
         sizeShares: quoteToPlace.sizeShares,
         isBuying: quoteToPlace.side === "bid",
       });
-      state.openOrders.push(toTrackedLiveOrder(quoteToPlace, result));
+      const tracked = toTrackedLiveOrder(quoteToPlace, result);
+      if (tracked.status === "open") {
+        state.openOrders.push(tracked);
+      }
+      const placeFill = buildPlaceTimeFillEvent({
+        order: tracked,
+        escrowAppId: result.escrowAppId,
+        matchedShares: result.matchedQuantity ?? 0,
+        matchedPrice: result.matchedPrice,
+      });
+      if (placeFill) {
+        const fillResult = applyLiveFillEvents(state, [placeFill])[0];
+        if (fillResult?.applied) actions.push({ kind: "skip", message: fillResult.message });
+      }
       state.strategyStats.liveOrdersPlaced += 1;
       if (quoteToPlace.side === "bid" && remainingLiveBidUsdc !== undefined) {
         remainingLiveBidUsdc = Math.max(0, remainingLiveBidUsdc - requiredBidUsdc(quoteToPlace, config));

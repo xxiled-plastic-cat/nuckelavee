@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 
 import { botStates } from "../../drizzle/schema.js";
 import { getDatabase } from "../db.js";
+import { migratePositionsToAppIdKeys } from "./inventoryView.js";
 import type { AlphaBotState } from "./alphaTypes.js";
 
 const MAX_HISTORY = 500;
@@ -23,6 +24,8 @@ export function emptyAlphaState(startingBalance: number): AlphaBotState {
     totalPnl: 0,
     fills: [],
     cancelledOrders: [],
+    liveFillEvents: [],
+    liveFillCursorByEscrow: {},
     strategyStats: {
       ticks: 0,
       rewardMarketsSeen: 0,
@@ -44,12 +47,14 @@ export function emptyAlphaState(startingBalance: number): AlphaBotState {
 }
 
 function normalizeAlphaState(parsed: AlphaBotState, startingBalance: number): AlphaBotState {
-  return {
+  const state: AlphaBotState = {
     ...emptyAlphaState(startingBalance),
     ...parsed,
     openOrders: Array.isArray(parsed.openOrders) ? parsed.openOrders : [],
     fills: Array.isArray(parsed.fills) ? parsed.fills : [],
     cancelledOrders: Array.isArray(parsed.cancelledOrders) ? parsed.cancelledOrders : [],
+    liveFillEvents: Array.isArray(parsed.liveFillEvents) ? parsed.liveFillEvents : [],
+    liveFillCursorByEscrow: parsed.liveFillCursorByEscrow ?? {},
     parityAttempts: Array.isArray(parsed.parityAttempts) ? parsed.parityAttempts : [],
     positionsByMarket: parsed.positionsByMarket ?? {},
     estimatedRewardsByMarket: parsed.estimatedRewardsByMarket ?? {},
@@ -61,6 +66,8 @@ function normalizeAlphaState(parsed: AlphaBotState, startingBalance: number): Al
     notificationState: parsed.notificationState ?? {},
     capitalLedger: parsed.capitalLedger,
   };
+  migratePositionsToAppIdKeys(state);
+  return state;
 }
 
 export async function loadAlphaState(key: string, startingBalance: number): Promise<AlphaBotState> {
@@ -75,6 +82,8 @@ export async function saveAlphaState(key: string, state: AlphaBotState): Promise
     ...state,
     fills: state.fills.slice(-MAX_HISTORY),
     cancelledOrders: state.cancelledOrders.slice(-MAX_HISTORY),
+    liveFillEvents: (state.liveFillEvents ?? []).slice(-MAX_HISTORY),
+    liveFillCursorByEscrow: state.liveFillCursorByEscrow ?? {},
     parityAttempts: state.parityAttempts.slice(-MAX_HISTORY),
     totalPnl: state.realisedPnl + state.unrealisedPnl,
     lastUpdated: new Date().toISOString(),

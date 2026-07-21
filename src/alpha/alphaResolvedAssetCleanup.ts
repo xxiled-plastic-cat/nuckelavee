@@ -1,3 +1,11 @@
+/**
+ * CLI-only resolved ASA cleanup (claim / close opt-ins).
+ *
+ * This path does **not** load or save bot state and must never adjust
+ * `realisedPnl`. Live tick settlement PnL for resolved free shares belongs
+ * solely to `runResolvedClaimLane`. Prefer claim-then-close for dust so the
+ * wallet is cleaned without double-counting trading PnL in bot ledgers.
+ */
 import algosdk from "algosdk";
 import type { OpenOrder } from "@alpha-arcade/sdk";
 
@@ -162,6 +170,9 @@ async function loadWalletOpenOrdersWithFallback(
 }
 
 export async function runResolvedAssetCleanup(options: CleanupOptions): Promise<void> {
+  console.log(
+    "[alpha-cleanup] CLI wallet ASA cleanup only — does not load/save bot state or adjust realisedPnl (claim lane owns trading PnL).",
+  );
   const config = readAlphaConfig();
   const { walletAddress, signer } = resolveWalletAddressAndSigner();
   const algod = new algosdk.Algodv2(config.algodToken ?? "", config.algodServer, "");

@@ -329,7 +329,8 @@ export function summarizeLiveExposure(
   const bidExposure = (orders: typeof bids) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
   const exitNotional = (orders: typeof exits) => orders.reduce((sum, order) => sum + order.price * order.remainingShares, 0);
   const exitPnlIfFilledUsd = exits.reduce((sum, order) => {
-    const position = state.positionsByMarket[order.marketId];
+    const position =
+      state.positionsByMarket[String(order.marketAppId)] ?? state.positionsByMarket[order.marketId];
     const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
     return sum + (order.price - (averageCost ?? 0)) * order.remainingShares;
   }, 0);

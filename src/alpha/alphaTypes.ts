@@ -166,6 +166,26 @@ export type AlphaParityAttempt = AlphaParityPlan & {
   createdAt: string;
 };
 
+export type LiveFillPriceSource = "limit" | "matched";
+
+/** Append-only live fill ledger entry (Phase 1 execution accountancy). */
+export type LiveFillEvent = {
+  id: string;
+  escrowAppId: number;
+  marketAppId: number;
+  marketId: string;
+  outcome: AlphaOutcome;
+  side: AlphaOrderSide;
+  shares: number;
+  price: number;
+  priceSource: LiveFillPriceSource;
+  source: AlphaQuote["source"];
+  filledSharesAfter: number;
+  observedAt: string;
+  title?: string;
+  slug?: string;
+};
+
 export type AlphaBotState = {
   startingBalance: number;
   cash: number;
@@ -181,6 +201,10 @@ export type AlphaBotState = {
   totalPnl: number;
   fills: AlphaPaperOrder[];
   cancelledOrders: AlphaPaperOrder[];
+  /** Append-only live fill events; source of truth for live VWAP updates. */
+  liveFillEvents?: LiveFillEvent[];
+  /** Last applied cumulative filled shares per escrow app id (string key). */
+  liveFillCursorByEscrow?: Record<string, number>;
   strategyStats: {
     ticks: number;
     rewardMarketsSeen: number;

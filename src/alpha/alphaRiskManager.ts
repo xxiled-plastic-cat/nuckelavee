@@ -1,5 +1,20 @@
+/**
+ * Risk exposure accounting (Phase 3).
+ *
+ * Single net formula for paper and live:
+ *   inventoryNotional = Σ (yesShares * avgYesCost + noShares * avgNoCost)
+ *   openBidNotional   = Σ open bid price * remainingShares  (mode-filtered)
+ *   askCoverage       = Σ open ask remainingShares * avgCost(outcome)
+ *                       (capped so coverage ≤ that side's inventory cost)
+ *   netExposure       = openBidNotional + inventoryNotional - askCoverage
+ *
+ * Ask coverage uses avg cost (not ask price) so units stay cost-basis. Inventory
+ * totals already include sell-escrow; subtracting ask coverage yields free
+ * inventory cost + open bids without double-counting exits in flight.
+ */
 import type { AlphaConfig, AlphaMode } from "./alphaConfig.js";
-import type { AlphaBotState, AlphaQuote } from "./alphaTypes.js";
+import { getPosition } from "./inventoryView.js";
+import type { AlphaBotState, AlphaOutcome, AlphaPaperOrder, AlphaQuote } from "./alphaTypes.js";
 
 export type AlphaRiskDecision = {
   allowed: boolean;
@@ -9,48 +24,112 @@ export type AlphaRiskDecision = {
 
 type QuoteLane = "reward" | "spread";
 
-function orderExposure(order: { side: string; price: number; remainingShares: number }): number {
-  return order.side === "bid" ? order.price * order.remainingShares : 0;
-}
-
 function matchesMode(order: { runMode?: "paper" | "live" }, mode: AlphaMode): boolean {
   const orderMode = order.runMode ?? "paper";
   if (mode === "live" || mode === "live-dry-run") return orderMode === "live";
   return orderMode === "paper";
 }
 
+function openOrders(state: AlphaBotState, mode: AlphaMode): AlphaPaperOrder[] {
+  return state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode));
+}
+
+function positionCostUsd(position: { yesShares: number; noShares: number; avgYesCost: number; avgNoCost: number }): number {
+  return position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost;
+}
+
+function sideAvgCost(position: { avgYesCost: number; avgNoCost: number } | undefined, outcome: AlphaOutcome): number {
+  if (!position) return 0;
+  return outcome === "YES" ? position.avgYesCost : position.avgNoCost;
+}
+
+function sideShares(position: { yesShares: number; noShares: number } | undefined, outcome: AlphaOutcome): number {
+  if (!position) return 0;
+  return outcome === "YES" ? position.yesShares : position.noShares;
+}
+
+export function getInventoryNotionalUsd(state: AlphaBotState): number {
+  return Object.values(state.positionsByMarket).reduce((sum, position) => sum + positionCostUsd(position), 0);
+}
+
+export function getInventoryNotionalUsdForMarket(state: AlphaBotState, marketAppId: number): number {
+  const position = getPosition(state, marketAppId);
+  return position ? positionCostUsd(position) : 0;
+}
+
+export function getOpenBidNotionalUsd(state: AlphaBotState, mode: AlphaMode, marketAppId?: number): number {
+  return openOrders(state, mode)
+    .filter((order) => order.side === "bid" && (marketAppId === undefined || order.marketAppId === marketAppId))
+    .reduce((sum, order) => sum + order.price * order.remainingShares, 0);
+}
+
+/**
+ * Cost-basis coverage from resting asks, capped per market/outcome so coverage
+ * cannot exceed that side's inventory cost.
+ */
+export function getAskCoverageUsd(state: AlphaBotState, mode: AlphaMode, marketAppId?: number): number {
+  const asks = openOrders(state, mode).filter(
+    (order) => order.side === "ask" && (marketAppId === undefined || order.marketAppId === marketAppId),
+  );
+
+  const remainingBySide = new Map<string, number>();
+  for (const ask of asks) {
+    const key = `${ask.marketAppId}:${ask.outcome}`;
+    remainingBySide.set(key, (remainingBySide.get(key) ?? 0) + ask.remainingShares);
+  }
+
+  let coverage = 0;
+  for (const [key, askShares] of remainingBySide) {
+    const [appIdRaw, outcomeRaw] = key.split(":");
+    const appId = Number(appIdRaw);
+    const outcome = outcomeRaw as AlphaOutcome;
+    const position = getPosition(state, appId);
+    const avgCost = sideAvgCost(position, outcome);
+    const held = sideShares(position, outcome);
+    const coveredShares = Math.min(askShares, Math.max(0, held));
+    coverage += coveredShares * Math.max(0, avgCost);
+  }
+  return coverage;
+}
+
+export function getNetExposureUsd(state: AlphaBotState, mode: AlphaMode, marketAppId?: number): number {
+  const inventory =
+    marketAppId === undefined ? getInventoryNotionalUsd(state) : getInventoryNotionalUsdForMarket(state, marketAppId);
+  const bids = getOpenBidNotionalUsd(state, mode, marketAppId);
+  const asks = getAskCoverageUsd(state, mode, marketAppId);
+  return Math.max(0, bids + inventory - asks);
+}
+
+function resolveMarketAppId(state: AlphaBotState, marketId: string): number | undefined {
+  const asNumber = Number(marketId);
+  if (Number.isFinite(asNumber) && String(asNumber) === marketId) return asNumber;
+
+  const fromPosition =
+    state.positionsByMarket[marketId]?.marketAppId ??
+    Object.values(state.positionsByMarket).find((candidate) => candidate.marketId === marketId)?.marketAppId;
+  if (fromPosition !== undefined) return fromPosition;
+
+  const fromOrder = state.openOrders.find((order) => order.marketId === marketId)?.marketAppId;
+  return fromOrder;
+}
+
 export function getMarketExposure(state: AlphaBotState, marketId: string, mode: AlphaMode = "paper"): number {
-  const orderExposureUsd = state.openOrders
-    .filter((order) => order.marketId === marketId && order.status === "open" && matchesMode(order, mode))
-    .reduce((sum, order) => sum + orderExposure(order), 0);
-  if (mode === "live" || mode === "live-dry-run") return orderExposureUsd;
-  const position = state.positionsByMarket[marketId];
-  if (!position) return orderExposureUsd;
-  return orderExposureUsd + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost;
+  const marketAppId = resolveMarketAppId(state, marketId);
+  if (marketAppId === undefined) {
+    return openOrders(state, mode)
+      .filter((order) => order.marketId === marketId && order.side === "bid")
+      .reduce((sum, order) => sum + order.price * order.remainingShares, 0);
+  }
+  return getNetExposureUsd(state, mode, marketAppId);
 }
 
 export function getTotalExposure(state: AlphaBotState, mode: AlphaMode = "paper"): number {
-  const orderExposureUsd = state.openOrders
-    .filter((order) => order.status === "open" && matchesMode(order, mode))
-    .reduce((sum, order) => sum + orderExposure(order), 0);
-  if (mode === "live" || mode === "live-dry-run") return orderExposureUsd;
-  const positionExposure = Object.values(state.positionsByMarket).reduce(
-    (sum, position) => sum + position.yesShares * position.avgYesCost + position.noShares * position.avgNoCost,
-    0,
-  );
-  return orderExposureUsd + positionExposure;
+  return getNetExposureUsd(state, mode);
 }
 
-function openAskShares(state: AlphaBotState, marketId: string, outcome: "YES" | "NO", mode: AlphaMode): number {
-  return state.openOrders
-    .filter(
-      (order) =>
-        order.marketId === marketId &&
-        order.outcome === outcome &&
-        order.side === "ask" &&
-        order.status === "open" &&
-        matchesMode(order, mode),
-    )
+function openAskShares(state: AlphaBotState, marketAppId: number, outcome: "YES" | "NO", mode: AlphaMode): number {
+  return openOrders(state, mode)
+    .filter((order) => order.marketAppId === marketAppId && order.outcome === outcome && order.side === "ask")
     .reduce((sum, order) => sum + order.remainingShares, 0);
 }
 
@@ -67,25 +146,23 @@ function laneFromOrder(order: { source: AlphaQuote["source"] }): QuoteLane {
 }
 
 function laneOpenOrderCount(state: AlphaBotState, lane: QuoteLane, mode: AlphaMode): number {
-  return state.openOrders.filter((order) => order.status === "open" && matchesMode(order, mode) && laneFromOrder(order) === lane).length;
+  return openOrders(state, mode).filter((order) => laneFromOrder(order) === lane).length;
 }
 
 function laneOpenOrderCountByMarket(state: AlphaBotState, lane: QuoteLane, marketId: string, mode: AlphaMode): number {
-  return state.openOrders.filter(
-    (order) => order.status === "open" && matchesMode(order, mode) && order.marketId === marketId && laneFromOrder(order) === lane,
-  ).length;
+  return openOrders(state, mode).filter((order) => order.marketId === marketId && laneFromOrder(order) === lane).length;
 }
 
-function laneOrderExposure(state: AlphaBotState, lane: QuoteLane, mode: AlphaMode): number {
-  return state.openOrders
-    .filter((order) => order.status === "open" && matchesMode(order, mode) && laneFromOrder(order) === lane)
-    .reduce((sum, order) => sum + orderExposure(order), 0);
+function laneBidNotional(state: AlphaBotState, lane: QuoteLane, mode: AlphaMode): number {
+  return openOrders(state, mode)
+    .filter((order) => order.side === "bid" && laneFromOrder(order) === lane)
+    .reduce((sum, order) => sum + order.price * order.remainingShares, 0);
 }
 
-function laneOrderExposureByMarket(state: AlphaBotState, lane: QuoteLane, marketId: string, mode: AlphaMode): number {
-  return state.openOrders
-    .filter((order) => order.status === "open" && matchesMode(order, mode) && order.marketId === marketId && laneFromOrder(order) === lane)
-    .reduce((sum, order) => sum + orderExposure(order), 0);
+function laneBidNotionalByMarket(state: AlphaBotState, lane: QuoteLane, marketId: string, mode: AlphaMode): number {
+  return openOrders(state, mode)
+    .filter((order) => order.side === "bid" && order.marketId === marketId && laneFromOrder(order) === lane)
+    .reduce((sum, order) => sum + order.price * order.remainingShares, 0);
 }
 
 export function checkQuoteRisk(
@@ -95,6 +172,7 @@ export function checkQuoteRisk(
   mode: AlphaMode,
 ): AlphaRiskDecision {
   const isInventoryExit = quote.source === "inventory_exit" && quote.side === "ask";
+  const isEntryBid = quote.side === "bid" && (quote.source === "reward" || quote.source === "spread");
   const lane = laneFromQuote(quote);
   const laneMaxOrderSizeUsd = isInventoryExit
     ? config.inventoryExitMaxNotionalUsd
@@ -130,20 +208,46 @@ export function checkQuoteRisk(
   if (quote.rewardEligible === false && quote.source === "reward") {
     return { allowed: false, reason: "reward quote would sit outside reward zone", riskLevel: "medium" };
   }
+
   const addedExposure = quote.side === "bid" ? quote.notionalUsd : 0;
-  if (!isInventoryExit && laneOrderExposureByMarket(state, lane, quote.marketId, mode) + addedExposure > laneMaxMarketExposureUsd) {
+
+  // Keep legacy per-lane open-bid notional caps for lane budget control.
+  if (!isInventoryExit && laneBidNotionalByMarket(state, lane, quote.marketId, mode) + addedExposure > laneMaxMarketExposureUsd) {
     return { allowed: false, reason: `${lane} market exposure would exceed lane cap`, riskLevel: "high" };
   }
-  if (!isInventoryExit && laneOrderExposure(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
+  if (!isInventoryExit && laneBidNotional(state, lane, mode) + addedExposure > laneMaxTotalExposureUsd) {
     return { allowed: false, reason: `${lane} total exposure would exceed lane cap`, riskLevel: "high" };
   }
+
+  // Net exposure (inventory + bids − ask coverage) must also fit lane caps.
+  if (!isInventoryExit && addedExposure > 0) {
+    if (getNetExposureUsd(state, mode, quote.marketAppId) + addedExposure > laneMaxMarketExposureUsd + 1e-9) {
+      return { allowed: false, reason: `${lane} market net exposure would exceed lane cap`, riskLevel: "high" };
+    }
+    if (getNetExposureUsd(state, mode) + addedExposure > laneMaxTotalExposureUsd + 1e-9) {
+      return { allowed: false, reason: `${lane} total net exposure would exceed lane cap`, riskLevel: "high" };
+    }
+  }
+
+  if (
+    isEntryBid &&
+    config.maxInventoryNotionalUsd > 0 &&
+    getInventoryNotionalUsd(state) >= config.maxInventoryNotionalUsd - 1e-9
+  ) {
+    return {
+      allowed: false,
+      reason: "inventory notional at/above ALPHA_MAX_INVENTORY_NOTIONAL_USD ceiling",
+      riskLevel: "high",
+    };
+  }
+
   if (mode === "paper" && quote.side === "bid" && quote.notionalUsd > state.cash) {
     return { allowed: false, reason: "bid requires more cash than available", riskLevel: "high" };
   }
   if (quote.side === "ask") {
-    const position = state.positionsByMarket[quote.marketId];
+    const position = getPosition(state, quote.marketAppId);
     const held = quote.outcome === "YES" ? position?.yesShares ?? 0 : position?.noShares ?? 0;
-    if (quote.sizeShares + openAskShares(state, quote.marketId, quote.outcome, mode) > held + 1e-9) {
+    if (quote.sizeShares + openAskShares(state, quote.marketAppId, quote.outcome, mode) > held + 1e-9) {
       return { allowed: false, reason: "ask would sell more shares than current inventory", riskLevel: "high" };
     }
   }

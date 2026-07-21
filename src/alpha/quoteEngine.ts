@@ -1,5 +1,6 @@
 import type { AlphaConfig } from "./alphaConfig.js";
 import { roundShares } from "./alphaClient.js";
+import { getPosition } from "./inventoryView.js";
 import { POOL_FALLBACK_DAILY_REWARD_SOURCE, type AlphaBotState, type AlphaMarket, type AlphaOrderbook, type AlphaOutcome, type AlphaQuote } from "./alphaTypes.js";
 
 const CONTROLLED_UNDERWATER_EXIT_REASON = "controlled underwater exit";
@@ -47,28 +48,28 @@ function laneNotionalUsd(
   return Math.max(desired, minRequired);
 }
 
-function positionShares(state: AlphaBotState, marketId: string, outcome: AlphaOutcome): number {
-  const position = state.positionsByMarket[marketId];
+function positionShares(state: AlphaBotState, marketAppId: number, outcome: AlphaOutcome): number {
+  const position = getPosition(state, marketAppId);
   if (!position) return 0;
   return outcome === "YES" ? position.yesShares : position.noShares;
 }
 
-function positionAverageCost(state: AlphaBotState, marketId: string, outcome: AlphaOutcome): number | undefined {
-  const position = state.positionsByMarket[marketId];
+function positionAverageCost(state: AlphaBotState, marketAppId: number, outcome: AlphaOutcome): number | undefined {
+  const position = getPosition(state, marketAppId);
   if (!position) return undefined;
   const averageCost = outcome === "YES" ? position.avgYesCost : position.avgNoCost;
   return averageCost > 0 ? averageCost : undefined;
 }
 
-function outcomeAgeSeconds(state: AlphaBotState, marketId: string, outcome: AlphaOutcome, now = Date.now()): number | undefined {
+function outcomeAgeSeconds(state: AlphaBotState, marketAppId: number, outcome: AlphaOutcome, now = Date.now()): number | undefined {
   const timestamps: number[] = [];
   for (const order of state.openOrders) {
-    if (order.runMode !== "live" || order.marketId !== marketId || order.outcome !== outcome || order.side !== "bid") continue;
+    if (order.runMode !== "live" || order.marketAppId !== marketAppId || order.outcome !== outcome || order.side !== "bid") continue;
     const created = Date.parse(order.createdAt);
     if (Number.isFinite(created)) timestamps.push(created);
   }
   for (const fill of state.fills) {
-    if (fill.runMode !== "live" || fill.marketId !== marketId || fill.outcome !== outcome || fill.side !== "bid") continue;
+    if (fill.runMode !== "live" || fill.marketAppId !== marketAppId || fill.outcome !== outcome || fill.side !== "bid") continue;
     const when = Date.parse(fill.updatedAt ?? fill.createdAt);
     if (Number.isFinite(when)) timestamps.push(when);
   }
@@ -80,19 +81,19 @@ function expectedLossUsd(averageCost: number, ask: number, shares: number): numb
   return Math.max(0, (averageCost - ask) * shares);
 }
 
-function existingControlledMarketLossUsd(state: AlphaBotState, marketId: string): number {
+function existingControlledMarketLossUsd(state: AlphaBotState, marketAppId: number): number {
   return state.openOrders
     .filter(
       (order) =>
         order.runMode === "live" &&
         order.status === "open" &&
-        order.marketId === marketId &&
+        order.marketAppId === marketAppId &&
         order.source === "inventory_exit" &&
         order.side === "ask" &&
         order.reason.startsWith(CONTROLLED_UNDERWATER_EXIT_REASON),
     )
     .reduce((sum, order) => {
-      const position = state.positionsByMarket[order.marketId];
+      const position = getPosition(state, order.marketAppId);
       const averageCost = order.outcome === "YES" ? position?.avgYesCost : position?.avgNoCost;
       if (averageCost === undefined || averageCost <= 0) return sum;
       return sum + expectedLossUsd(averageCost, order.price, order.remainingShares);
@@ -241,11 +242,11 @@ export function generateQuotes(
       }
     }
 
-    const inventory = positionShares(state, market.id, outcome);
+    const inventory = positionShares(state, market.marketAppId, outcome);
     if (inventory <= 0) continue;
     if (!exitsEnabled) continue;
-    const averageCost = positionAverageCost(state, market.id, outcome);
-    const positionAgeSeconds = outcomeAgeSeconds(state, market.id, outcome);
+    const averageCost = positionAverageCost(state, market.marketAppId, outcome);
+    const positionAgeSeconds = outcomeAgeSeconds(state, market.marketAppId, outcome);
     let ask =
       market.reward.isRewardMarket && rewardSpread !== undefined && rewardMidpointAllowed
         ? midpoint + rewardBuffer
@@ -293,7 +294,7 @@ export function generateQuotes(
         const sizeShares = Math.min(sized.sizeShares, roundShares(inventory));
         if (sizeShares > 0) {
           if (controlledUnderwaterExit && averageCost !== undefined && !config.inventoryExitFullPosition) {
-            const marketLossUsed = existingControlledMarketLossUsd(state, market.id);
+            const marketLossUsed = existingControlledMarketLossUsd(state, market.marketAppId);
             const quoteLoss = expectedLossUsd(averageCost, ask, sizeShares);
             if (marketLossUsed + quoteLoss > config.underwaterExitMaxMarketLossUsd) continue;
           }
