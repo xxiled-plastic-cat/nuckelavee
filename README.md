@@ -1,6 +1,8 @@
 # nuckelavee
 
-Div3rsaFi scanner and execution-aware liquidity controller.
+Div3rsaFi / Alpha **user-agent**: walleted scanner, live trading, fills, inventory, settlement, and dashboard.
+
+Amarok (research API + unsigned execution quotes + remote MCP) lives in a **separate repo** (`compx-labs/amarok`). This tree does not ship Amarok protocol/MCP source.
 
 ## Install
 
